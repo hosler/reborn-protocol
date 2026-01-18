@@ -481,3 +481,95 @@ class ServerCodec:
     def reset_decode_state(self) -> None:
         """Reset decode state (e.g., for reconnection handling)."""
         self._first_decode = True
+
+
+# =============================================================================
+# Gen2Codec - List server codec
+# =============================================================================
+
+class Gen2Codec:
+    """
+    ENCRYPT_GEN_2 codec for list server communication.
+
+    No encryption, only zlib compression. Used for server-to-listserver
+    communication after the initial REGISTERV3 packet.
+    """
+
+    def __init__(self):
+        pass
+
+    def send_packet(self, data: bytes) -> bytes:
+        """
+        Encode packet for sending (returns with length prefix).
+
+        Args:
+            data: Packet data to send
+
+        Returns:
+            Length-prefixed zlib-compressed packet
+        """
+        # Compress with zlib
+        compressed = zlib.compress(data)
+
+        # Return with length prefix
+        return struct.pack('>H', len(compressed)) + compressed
+
+    def recv_packet(self, data: bytes) -> Optional[bytes]:
+        """
+        Decode received packet.
+
+        Args:
+            data: Packet data (without length prefix)
+
+        Returns:
+            Decompressed data, or None on error
+        """
+        if not data:
+            return None
+
+        # Try zlib decompression first
+        try:
+            return zlib.decompress(data)
+        except:
+            # If decompression fails, return raw data (might be uncompressed)
+            return data
+
+
+# =============================================================================
+# Gen1Codec - Plain codec (no compression, no encryption)
+# =============================================================================
+
+class Gen1Codec:
+    """
+    ENCRYPT_GEN_1 codec for initial list server registration.
+
+    No encryption, no compression. Used for the REGISTERV3 packet.
+    """
+
+    def __init__(self):
+        pass
+
+    def send_packet(self, data: bytes) -> bytes:
+        """
+        Encode packet for sending (returns with length prefix).
+
+        Args:
+            data: Packet data to send
+
+        Returns:
+            Length-prefixed raw packet (no compression/encryption)
+        """
+        # Return raw data with length prefix
+        return struct.pack('>H', len(data)) + data
+
+    def recv_packet(self, data: bytes) -> Optional[bytes]:
+        """
+        Decode received packet.
+
+        Args:
+            data: Packet data (without length prefix)
+
+        Returns:
+            Raw data
+        """
+        return data if data else None

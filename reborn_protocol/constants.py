@@ -657,3 +657,76 @@ class NPCBLOCKFLAG(IntFlag):
     """NPC blocking flags"""
     BLOCK = 0x00               # NPC blocks movement
     NOBLOCK = 0x01             # NPC does not block
+
+
+# =============================================================================
+# SVO - Server -> ListServer Packet IDs (Server Output)
+# =============================================================================
+class SVO(IntEnum):
+    """Server -> ListServer packet IDs (Server Output)"""
+    SETNAME = 0                # Set server name (deprecated)
+    SETDESC = 1                # Set description (deprecated)
+    SETLANG = 2                # Set language (deprecated)
+    SETVERS = 3                # Set version (deprecated)
+    SETURL = 4                 # Set URL (deprecated)
+    SETIP = 5                  # Set IP (deprecated)
+    SETPORT = 6                # Set port (deprecated)
+    SETPLYR = 7                # Clear players (start of player list)
+    VERIACC = 8                # Verify account (deprecated)
+    VERIGUILD = 9              # Verify guild/nickname
+    GETFILE = 10               # Get file (deprecated)
+    NICKNAME = 11              # Set nickname
+    GETPROF = 12               # Get profile
+    SETPROF = 13               # Set profile
+    PLYRADD = 14               # Add player to list
+    PLYRREM = 15               # Remove player from list
+    PING = 16                  # Ping/keepalive
+    VERIACC2 = 17              # Verify account (current)
+    SETLOCALIP = 18            # Set local IP
+    GETFILE2 = 19              # Get file v2 (deprecated)
+    UPDATEFILE = 20            # Update file
+    GETFILE3 = 21              # Get file v3
+    NEWSERVER = 22             # Register new server (full info)
+    SERVERHQPASS = 23          # Server HQ password
+    SERVERHQLEVEL = 24         # Server HQ level
+    SERVERINFO = 25            # Server info
+    REQUESTLIST = 26           # Request list
+    REQUESTSVRINFO = 27        # Request server info
+    REQUESTBUDDIES = 28        # Request buddies
+    PMPLAYER = 29              # PM player across servers
+    REGISTERV3 = 30            # Register v3 (modern handshake)
+    SENDTEXT = 31              # Send text/command
+    PACKETCOUNT = 32           # Packet count
+
+
+# =============================================================================
+# SVI - ListServer -> Server Packet IDs (Server Input)
+# =============================================================================
+class SVI(IntEnum):
+    """ListServer -> Server packet IDs (Server Input)"""
+    VERIACC = 0                # Verify account response (deprecated)
+    VERIGUILD = 1              # Verify guild response
+    FILESTART = 2              # File transfer start (deprecated)
+    FILEEND = 3                # File transfer end (deprecated)
+    FILEDATA = 4               # File transfer data (deprecated)
+    VERSIONOLD = 5             # Server version is old
+    VERSIONCURRENT = 6         # Server version is current
+    PROFILE = 7                # Profile response
+    ERRMSG = 8                 # Error message
+    NULL4 = 9                  # Null packet
+    NULL5 = 10                 # Null packet
+    VERIACC2 = 11              # Verify account response (current)
+    FILESTART2 = 12            # File transfer start v2 (deprecated)
+    FILEDATA2 = 13             # File transfer data v2 (deprecated)
+    FILEEND2 = 14              # File transfer end v2 (deprecated)
+    FILESTART3 = 15            # File transfer start v3
+    FILEDATA3 = 16             # File transfer data v3
+    FILEEND3 = 17              # File transfer end v3
+    SERVERINFO = 18            # Server info response
+    REQUESTTEXT = 19           # Request text from server
+    SENDTEXT = 20              # Send text to server
+    PMPLAYER = 29              # PM player response
+    ASSIGNPCID = 30            # Assign PC ID (device ID)
+    PING = 99                  # Ping/keepalive
+    RAWDATA = 100              # Raw data
+    PACKETCOUNT = 101          # Packet count

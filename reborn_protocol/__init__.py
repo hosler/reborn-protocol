@@ -31,12 +31,16 @@ from .constants import (
     PLPERM,
     NPCVISFLAG,
     NPCBLOCKFLAG,
+    SVI,
+    SVO,
 )
 
 from .codec import (
     PacketReader,
     PacketBuilder,
     PacketBuffer,
+    Gen1Codec,
+    Gen2Codec,
     Gen5Codec,
     ServerCodec,
 )
@@ -62,10 +66,14 @@ __all__ = [
     "PLPERM",
     "NPCVISFLAG",
     "NPCBLOCKFLAG",
+    "SVI",
+    "SVO",
     # Codec
     "PacketReader",
     "PacketBuilder",
     "PacketBuffer",
+    "Gen1Codec",
+    "Gen2Codec",
     "Gen5Codec",
     "ServerCodec",
 ]

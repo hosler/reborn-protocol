@@ -19,14 +19,21 @@ This library provides common protocol components used by both:
 
 ### Constants (`reborn_protocol.constants`)
 
-- `PLI` - Client -> Server packet IDs (Player Input)
-- `PLO` - Server -> Client packet IDs (Player Output)
-- `PLPROP` - Player property IDs
-- `NPCPROP` - NPC property IDs
-- `BDPROP` / `BDMODE` - Baddy property/mode IDs
+**Game Protocol:**
+- `PLI` - Client → Server packet IDs (Player Input) - 162 types
+- `PLO` - Server → Client packet IDs (Player Output) - 198 types
+- `PLPROP` - Player property IDs - 83 properties
+- `NPCPROP` - NPC property IDs - 77 properties
+- `BDPROP` / `BDMODE` - Baddy property/mode IDs - 11 properties
 - `LevelItemType` - Ground item types
 - `PLTYPE` / `PLSTATUS` / `PLFLAG` / `PLPERM` - Player flags and permissions
 - `NPCVISFLAG` / `NPCBLOCKFLAG` - NPC visibility and blocking flags
+
+**List Server Protocol:**
+- `SVO` - Server → ListServer packet IDs (Server Output) - 32 types
+- `SVI` - ListServer → Server packet IDs (Server Input) - 26 types
+
+Total: **360+ packet and property types defined**
 
 ### Codec (`reborn_protocol.codec`)
 
@@ -63,8 +70,11 @@ from reborn_protocol import (
     RebornEncryption,
     CompressionType,
 
-    # Constants
+    # Game Protocol Constants
     PLI, PLO, PLPROP, NPCPROP,
+
+    # List Server Protocol Constants
+    SVI, SVO,
 
     # Codec
     PacketReader,
