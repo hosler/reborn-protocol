@@ -543,7 +543,8 @@ class Gen1Codec:
     """
     ENCRYPT_GEN_1 codec for initial list server registration.
 
-    No encryption, no compression. Used for the REGISTERV3 packet.
+    No encryption, no compression, NO LENGTH PREFIX.
+    Used for the REGISTERV3 packet - sends raw data directly.
     """
 
     def __init__(self):
@@ -551,16 +552,16 @@ class Gen1Codec:
 
     def send_packet(self, data: bytes) -> bytes:
         """
-        Encode packet for sending (returns with length prefix).
+        Encode packet for sending (raw data, no length prefix).
 
         Args:
             data: Packet data to send
 
         Returns:
-            Length-prefixed raw packet (no compression/encryption)
+            Raw packet data (no compression/encryption/length prefix)
         """
-        # Return raw data with length prefix
-        return struct.pack('>H', len(data)) + data
+        # Return raw data - NO length prefix for Gen1
+        return data
 
     def recv_packet(self, data: bytes) -> Optional[bytes]:
         """
