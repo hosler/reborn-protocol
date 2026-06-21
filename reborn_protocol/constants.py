@@ -301,6 +301,7 @@ class PLO(IntEnum):
     UNKNOWN193 = 193           # Unknown (5-byte int?, unhandled by 6.037)
     CLEARWEAPONS = 194         # Clear weapons
     UNKNOWN195 = 195           # Unknown (ganis?)
+    SERVERLISTCONNECTED = 196  # List server is connected (blank packet)
     UNKNOWN197 = 197           # Unknown (NPC registration, offline cache)
     UNKNOWN198 = 198           # Unknown
 
