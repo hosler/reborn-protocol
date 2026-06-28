@@ -573,6 +573,15 @@ class Lexer:
     def _string_mode(self, raw):
         if self.pos >= self.n:
             return Token(EOF, "", self.pos)
+        # In GScript double quotes GROUP a value (e.g. "#a", "#I(list,0)"); the
+        # quote chars are delimiters, not part of the string. Skip them so a
+        # quoted account isn't stored as "hosler1" (raw say-style mode keeps
+        # them literal). Content/message-codes inside are scanned normally.
+        if not raw:
+            while self.pos < self.n and self.text[self.pos] == '"':
+                self.pos += 1
+            if self.pos >= self.n:
+                return Token(EOF, "", self.pos)
         c = self.text[self.pos]
         if c == "}" and self._can_cmd_pop():
             self.emit_before(END)
@@ -611,6 +620,8 @@ class Lexer:
         while self.pos < n:
             ch = t[self.pos]
             if not raw and ch == "#":
+                break
+            if not raw and ch == '"':   # quote delimiter — stop, _string_mode skips it
                 break
             if ch == "}" and cmd_pop:
                 break
