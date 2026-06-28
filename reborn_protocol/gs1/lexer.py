@@ -129,8 +129,13 @@ class LexError(Exception):
 
 class Lexer:
     def __init__(self, text: str):
-        self.text = text
-        self.n = len(text)
+        # On the wire GS1 scripts use the section sign (U+00A7 '§', byte 0xA7) as
+        # the statement/line separator instead of '\n' (the server stores '\n',
+        # the protocol substitutes '§'). Normalise it back so classic-server
+        # scripts lex identically to locally-authored '\n' ones. A '§' in a
+        # say/showtext string is likewise just an embedded line break.
+        self.text = text.replace("\xa7", "\n")
+        self.n = len(self.text)
         self.pos = 0
         self.mode = DEFAULT
         self.mode_stack: list[str] = []
@@ -531,6 +536,13 @@ class Lexer:
             self.pos += 1
             self.push_array_access()
             return Token("TOKEN_BRACKET_LEFT", "[", self.pos - 1)
+        if c == "*":
+            # '*' is a legal flag-name character: Graal stores a string flag's
+            # >223-char overflow in a twin flag whose name ends in '*'
+            # (e.g. server.room1 + server.room1*). In variable-name mode it is
+            # part of the identifier, not multiplication (that's expr mode).
+            self.pos += 1
+            return Token(IDENTIFIER, "*", self.pos - 1)
         if c in "|?:.":
             self.pos += 1
             return Token(PUNCT[c], c, self.pos - 1)
