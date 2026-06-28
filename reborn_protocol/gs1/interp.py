@@ -250,11 +250,12 @@ class Interpreter:
             return to_str(self.eval(a[0])) if a else ""
         if code == "#T":  # trim
             return to_str(self.eval(a[0])).strip() if a else ""
-        if code == "#e":  # substr(start, len, str)
+        if code == "#e":  # substr(start, len, str); negative len = to end
             if len(a) >= 3:
                 start = max(0, int(math.floor(to_num(self.eval(a[0])))))
-                length = max(0, int(math.floor(to_num(self.eval(a[1])))))
-                return to_str(self.eval(a[2]))[start:start + length]
+                length = int(math.floor(to_num(self.eval(a[1]))))
+                s = to_str(self.eval(a[2]))
+                return s[start:] if length < 0 else s[start:start + length]
             return ""
         if code == "#I":  # csv item by index
             if len(a) >= 2:
