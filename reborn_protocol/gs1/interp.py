@@ -46,6 +46,7 @@ class Interpreter:
     def __init__(self, ctx: Context):
         self.ctx = ctx
         self._depth = 0
+        self._loop_depth = 0   # enclosing while/for nesting (for sleep semantics)
 
     # -- entry -------------------------------------------------------------
     def run(self, program: ast.Program):
@@ -111,28 +112,36 @@ class Interpreter:
             self.exec_block(node.els)
 
     def _st_While(self, node):
-        while to_bool(self.eval(node.cond)):
-            self._step()  # guard empty-body loops too
-            try:
-                self.exec_block(node.body)
-            except BreakSignal:
-                break
-            except ContinueSignal:
-                continue
+        self._loop_depth += 1
+        try:
+            while to_bool(self.eval(node.cond)):
+                self._step()  # guard empty-body loops too
+                try:
+                    self.exec_block(node.body)
+                except BreakSignal:
+                    break
+                except ContinueSignal:
+                    continue
+        finally:
+            self._loop_depth -= 1
 
     def _st_For(self, node):
         if node.init is not None:
             self.exec(node.init)
-        while node.cond is None or to_bool(self.eval(node.cond)):
-            self._step()  # guard empty-body loops too
-            try:
-                self.exec_block(node.body)
-            except BreakSignal:
-                break
-            except ContinueSignal:
-                pass
-            if node.post is not None:
-                self.exec(node.post)
+        self._loop_depth += 1
+        try:
+            while node.cond is None or to_bool(self.eval(node.cond)):
+                self._step()  # guard empty-body loops too
+                try:
+                    self.exec_block(node.body)
+                except BreakSignal:
+                    break
+                except ContinueSignal:
+                    pass
+                if node.post is not None:
+                    self.exec(node.post)
+        finally:
+            self._loop_depth -= 1
 
     def _st_With(self, node):
         obj = self.eval(node.obj)
@@ -166,12 +175,16 @@ class Interpreter:
     def _st_Command(self, node):
         name = node.name
         if name == "sleep":
-            # We can't truly suspend, so `sleep` yields: break the enclosing
-            # loop (a stray break at top level is a no-op, so `sleep 1; foo()`
-            # still runs foo). Without this, GS1 wait-loops like
-            # `while(!hasweapon(x)){ ...; sleep .05; }` spin to the step budget
-            # every run — that's what made level changes take seconds.
-            raise BreakSignal()
+            # We can't truly suspend. Inside a loop, `sleep` yields by breaking
+            # the enclosing loop (so wait-loops like
+            # `while(!hasweapon(x)){ ...; sleep .05; }` don't spin to the step
+            # budget). OUTSIDE a loop it's a no-op so a sequential `sleep 1; foo`
+            # still runs foo — a BreakSignal there would abort the rest of the
+            # enclosing if-block (this is what stopped NPC 162's game-start from
+            # firing level.vase/level.active after its sleeps).
+            if self._loop_depth > 0:
+                raise BreakSignal()
+            return
         if name in _VAR_COMMANDS:
             self._exec_var_command(node)
             return
