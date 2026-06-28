@@ -395,14 +395,23 @@ class Parser:
                 parts.append(self.parse_messagecode())
         return ast.StrConcat(parts)
 
+    def _paren_arg_or_empty(self):
+        # An omitted arg (e.g. strequals(a,) or #e(0,x,,)) is an empty string,
+        # not a parse error. Needed because the lexer's mode stack doesn't
+        # always emit a string token for an empty arg after a nested
+        # messagecode-with-parens (#P1(-1)).
+        if self.at("TOKEN_COMMA", "TOKEN_PAREN_RIGHT"):
+            return ast.Str("")
+        return self.parse_expression()
+
     def parse_messagecode(self):
         t = self.eat("MESSAGECODE")
         args = []
         if self.accept("TOKEN_PAREN_LEFT"):
             if not self.at("TOKEN_PAREN_RIGHT"):
-                args.append(self.parse_expression())
+                args.append(self._paren_arg_or_empty())
                 while self.accept("TOKEN_COMMA"):
-                    args.append(self.parse_expression())
+                    args.append(self._paren_arg_or_empty())
             self.eat("TOKEN_PAREN_RIGHT")
         return ast.MessageCode(t.text, args)
 
@@ -411,9 +420,9 @@ class Parser:
         self.eat("TOKEN_PAREN_LEFT")
         args = []
         if not self.at("TOKEN_PAREN_RIGHT"):
-            args.append(self.parse_expression())
+            args.append(self._paren_arg_or_empty())
             while self.accept("TOKEN_COMMA"):
-                args.append(self.parse_expression())
+                args.append(self._paren_arg_or_empty())
         self.eat("TOKEN_PAREN_RIGHT")
         return ast.Call(name, args)
 
