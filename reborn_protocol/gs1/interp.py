@@ -468,18 +468,21 @@ class Interpreter:
 
     def _resolve(self, ref):
         names = [self._part_name(p) for p in ref.parts]
-        index = None
+        # Evaluate ALL indices on the indexed part (2D access like tiles[x,y]).
+        # The var store uses the first index; built-ins get the whole list.
+        indices = []
         for p in ref.parts:
             if p.index:
-                index = int(to_num(self.eval(p.index[0])))
+                indices = [int(to_num(self.eval(e))) for e in p.index]
                 break
         first = names[0]
         if first in NAMESPACES and len(names) > 1:
-            return NAMESPACES[first], ".".join(names[1:]), index, names
-        return None, ".".join(names), index, names
+            return NAMESPACES[first], ".".join(names[1:]), indices, names
+        return None, ".".join(names), indices, names
 
     def get_ref(self, ref):
-        scope, key, index, names = self._resolve(ref)
+        scope, key, indices, names = self._resolve(ref)
+        index = indices[0] if indices else None
         if scope is not None:
             v = self.ctx.vars.get(scope, key, index)
             return UNSET_VAL if v is UNSET else v
@@ -487,37 +490,36 @@ class Interpreter:
         if key and key == self.ctx.active_event:
             return 1.0
         # bare: built-in attribute first, then player flag/var
-        idxlist = [index] if index is not None else []
-        v = self.ctx.host.get_builtin(key, idxlist, self.ctx)
+        v = self.ctx.host.get_builtin(key, indices, self.ctx)
         if v is not UNSET:
             return v
         v = self.ctx.vars.get(None, key, index)
         return UNSET_VAL if v is UNSET else v
 
     def set_ref(self, ref, value):
-        scope, key, index, names = self._resolve(ref)
+        scope, key, indices, names = self._resolve(ref)
+        index = indices[0] if indices else None
         if scope is not None:
             self.ctx.vars.set(scope, key, value, index)
             return
-        idxlist = [index] if index is not None else []
-        if self.ctx.host.set_builtin(key, value, idxlist, self.ctx):
+        if self.ctx.host.set_builtin(key, value, indices, self.ctx):
             return
         self.ctx.vars.set(None, key, value, index)
 
     def unset_ref(self, ref):
-        scope, key, index, names = self._resolve(ref)
+        scope, key, indices, names = self._resolve(ref)
         self.ctx.vars.unset(scope, key)
 
     def _store_get(self, ref):
         """Read a flag/var from the var store only (ignores host built-ins)."""
-        scope, key, index, names = self._resolve(ref)
-        v = self.ctx.vars.get(scope, key, index)
+        scope, key, indices, names = self._resolve(ref)
+        v = self.ctx.vars.get(scope, key, indices[0] if indices else None)
         return UNSET_VAL if v is UNSET else v
 
     def _store_set(self, ref, value):
         """Write a flag/var to the var store only (ignores host built-ins)."""
-        scope, key, index, names = self._resolve(ref)
-        self.ctx.vars.set(scope, key, value, index)
+        scope, key, indices, names = self._resolve(ref)
+        self.ctx.vars.set(scope, key, value, indices[0] if indices else None)
 
     def _array_append(self, ref, value):
         cur = self._store_get(ref)
