@@ -165,6 +165,13 @@ class Interpreter:
 
     def _st_Command(self, node):
         name = node.name
+        if name == "sleep":
+            # We can't truly suspend, so `sleep` yields: break the enclosing
+            # loop (a stray break at top level is a no-op, so `sleep 1; foo()`
+            # still runs foo). Without this, GS1 wait-loops like
+            # `while(!hasweapon(x)){ ...; sleep .05; }` spin to the step budget
+            # every run — that's what made level changes take seconds.
+            raise BreakSignal()
         if name in _VAR_COMMANDS:
             self._exec_var_command(node)
             return
