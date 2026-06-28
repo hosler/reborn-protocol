@@ -199,12 +199,19 @@ class Parser:
     def parse_command(self):
         name = self.next().text
         args = []
-        while not self.at(*STMT_TERMINATORS):
-            args.append(self.parse_command_arg())
-            if not self.accept("TOKEN_COMMA"):
-                break
+        if not self.at(*STMT_TERMINATORS):
+            args.append(self._command_arg_or_empty())
+            while self.accept("TOKEN_COMMA"):
+                args.append(self._command_arg_or_empty())
         self._end_statement()
         return ast.Command(name, args)
+
+    def _command_arg_or_empty(self):
+        # An omitted positional arg (leading/consecutive/trailing comma, e.g.
+        # `shoot ,,,,,,blank,`) is an empty string in GS1, not a parse error.
+        if self.at("TOKEN_COMMA") or self.at(*STMT_TERMINATORS):
+            return ast.Str("")
+        return self.parse_command_arg()
 
     def parse_command_arg(self):
         if self.peek().type in SPECIAL_LITS:
