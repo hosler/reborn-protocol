@@ -237,7 +237,11 @@ class Interpreter:
         # compound strings are trimmed both sides by the engine
         # (GS1Visitor::visitCompoundString -> trimMutate), which strips the
         # command/argument separator space; internal spacing is preserved.
-        return "".join(self._str_part(p) for p in node.parts).strip()
+        s = "".join(self._str_part(p) for p in node.parts).strip()
+        # Graal `name=` value-of idiom applies to the ASSEMBLED string (e.g.
+        # server.room#v(RoomID)= -> "server.room1=" -> room1's value).
+        vo = self._value_of(s)
+        return s if vo is None else vo
 
     def _str_part(self, p):
         if isinstance(p, ast.Str):
@@ -246,6 +250,28 @@ class Interpreter:
             return self._eval_messagecode(p)
         return to_str(self.eval(p))
 
+    def _value_of(self, s):
+        """Graal `name=` value-of idiom: a bareword ending in '=' resolves to the
+        variable's VALUE, not the literal text (e.g. strlen(server.room1=) is the
+        length of room1's value). Restricted to NAMESPACED refs that EXIST, so
+        ordinary string literals ending in '=' (e.g. "Score=") are left alone.
+        Returns the value string, or None if `s` isn't this idiom."""
+        if len(s) < 3 or s[-1] != "=" or s[-2] == "=":
+            return None
+        name = s[:-1]
+        dot = name.find(".")
+        if dot <= 0:
+            return None                      # must be namespaced (server.x, this.x)
+        scope = NAMESPACES.get(name[:dot])
+        if scope is None:
+            return None
+        key = name[dot + 1:]
+        # key is a flat flag/var name (allow the 223-overflow '*' twin), no spaces
+        if not key or any(c in key for c in " \t.="):
+            return None
+        v = self.ctx.vars.get(scope, key)
+        return None if v is UNSET else to_str(v)
+
     def _ex_MessageCode(self, node):
         return self._eval_messagecode(node)
 
@@ -253,7 +279,17 @@ class Interpreter:
         code = node.code
         a = node.args
         # computed / string-manipulation codes (faithful to GS1MessageCodes.cpp)
-        if code in ("#v", "#s", "#U"):
+        if code == "#s":
+            # string-of: an UNSET flag is the empty string, NOT "0" (an unset
+            # var otherwise evaluates to 0.0). The bomber room editor relies on
+            # #s(server.roomN*) being "" when a room has no 223-overflow twin.
+            if not a:
+                return ""
+            if isinstance(a[0], ast.VarRef):
+                v = self.get_ref(a[0])
+                return "" if v is UNSET_VAL else to_str(v)
+            return to_str(self.eval(a[0]))
+        if code in ("#v", "#U"):
             return to_str(self.eval(a[0])) if a else ""
         if code == "#T":  # trim
             return to_str(self.eval(a[0])).strip() if a else ""
