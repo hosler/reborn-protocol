@@ -235,7 +235,10 @@ class Interpreter:
             return
         if name == "tokenize":
             s = to_str(self.eval(node.args[0])) if node.args else ""
-            self.ctx.tokenize_tokens = s.split()
+            # GS1 tokenize splits on whitespace AND commas — the bomber's room
+            # strings ("Join <timer>,host,member,..") and slot lists are
+            # comma-separated, and standby NPC 190 reads members via #t(i).
+            self.ctx.tokenize_tokens = s.replace(",", " ").split()
             return
         if name == "tokenize2":
             s = to_str(self.eval(node.args[0])) if node.args else ""
@@ -264,7 +267,11 @@ class Interpreter:
         elif name == "unset":
             self.unset_ref(args[0])
         elif name == "setstring":
-            val = to_str(self.eval(args[1])) if len(args) > 1 else ""
+            # The value is the rest of the line; GS1 command args are split on
+            # commas, so rejoin them with commas to reconstruct it (e.g.
+            # `setstring client.b_temp,"a","b","",""` -> "a,b,," and
+            # `setstring server.bombrm_N,Join <t>,<list>` keeps the player list).
+            val = ",".join(to_str(self.eval(a)) for a in args[1:])
             if val == "":
                 self.unset_ref(args[0])
             else:
