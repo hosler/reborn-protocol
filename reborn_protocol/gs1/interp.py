@@ -47,6 +47,11 @@ class Interpreter:
         self.ctx = ctx
         self._depth = 0
         self._loop_depth = 0   # enclosing while/for nesting (for sleep semantics)
+        # Cooperative-coroutine mode: when True, `sleep N` SUSPENDS the script
+        # (the generator yields N seconds; a scheduler resumes it later). When
+        # False (pygserver / tests / expression-context calls) sleep can't
+        # suspend, so it falls back to break-the-enclosing-loop / no-op.
+        self._coro = False
 
     # -- entry -------------------------------------------------------------
     def run(self, program: ast.Program):
@@ -82,75 +87,127 @@ class Interpreter:
                 pass  # stray control-flow outside a loop is a no-op
 
     # -- statements --------------------------------------------------------
-    def exec_block(self, body):
-        for stmt in body:
-            self.exec(stmt)
-
     def _step(self):
         self.ctx.steps += 1
         if self.ctx.steps > self.ctx.max_steps:
             raise RuntimeError("GS1 step budget exceeded (possible infinite loop)")
 
+    # -- synchronous drains (pygserver / tests / non-suspending contexts) ---
+    # In coro mode these still run to completion immediately; only the scheduler
+    # (which pumps iter_event) honours the sleep-suspend yields.
     def exec(self, node):
-        self._step()
-        m = getattr(self, "_st_" + type(node).__name__, None)
-        if m is None:
-            raise RuntimeError(f"cannot execute node {type(node).__name__}")
-        m(node)
+        for _ in self._gx(node):
+            pass
 
-    def _st_Block(self, node):
-        self.exec_block(node.body)
+    def exec_block(self, body):
+        for stmt in body:
+            for _ in self._gx(stmt):
+                pass
+
+    # -- generator execution (cooperative sleep) ---------------------------
+    def _gblock(self, body):
+        for stmt in body:
+            yield from self._gx(stmt)
+
+    def _gx(self, node):
+        """Execute one statement as a generator. Yields sleep-seconds when the
+        script suspends (coro mode); control-flow recurses via `yield from`.
+        Leaf statements run synchronously via their `_st_*` handlers."""
+        self._step()
+        t = type(node).__name__
+        if t == "If":
+            if to_bool(self.eval(node.cond)):
+                yield from self._gblock(node.then)
+            elif node.els is not None:
+                yield from self._gblock(node.els)
+        elif t == "Block":
+            yield from self._gblock(node.body)
+        elif t == "While":
+            self._loop_depth += 1
+            try:
+                while to_bool(self.eval(node.cond)):
+                    self._step()  # guard empty-body loops too
+                    try:
+                        yield from self._gblock(node.body)
+                    except BreakSignal:
+                        break
+                    except ContinueSignal:
+                        continue
+            finally:
+                self._loop_depth -= 1
+        elif t == "For":
+            if node.init is not None:
+                self.exec(node.init)
+            self._loop_depth += 1
+            try:
+                while node.cond is None or to_bool(self.eval(node.cond)):
+                    self._step()  # guard empty-body loops too
+                    try:
+                        yield from self._gblock(node.body)
+                    except BreakSignal:
+                        break
+                    except ContinueSignal:
+                        pass
+                    if node.post is not None:
+                        self.exec(node.post)
+            finally:
+                self._loop_depth -= 1
+        elif t == "With":
+            obj = self.eval(node.obj)
+            prev = self.ctx.this_obj
+            self.ctx.this_obj = obj
+            try:
+                yield from self._gblock(node.body)
+            finally:
+                self.ctx.this_obj = prev
+        elif t == "UserCall":
+            yield from self._gcall_user(node.name)
+        elif t == "Command" and node.name == "sleep":
+            secs = to_num(self.eval(node.args[0])) if node.args else 0.0
+            if self._coro:
+                if secs > 0:
+                    yield secs          # suspend; the scheduler resumes us later
+            elif self._loop_depth > 0:
+                raise BreakSignal()     # sync: yield by breaking the wait-loop
+            # sync, outside a loop: no-op (sequential `sleep 1; foo` runs foo)
+        else:
+            m = getattr(self, "_st_" + t, None)
+            if m is None:
+                raise RuntimeError(f"cannot execute node {t}")
+            m(node)
+
+    def _gcall_user(self, name):
+        fn = self.ctx.functions.get(name)
+        if fn is None:
+            return
+        if self._depth >= _MAX_CALL_DEPTH:
+            raise RuntimeError("GS1 max call depth exceeded")
+        self._depth += 1
+        try:
+            yield from self._gblock(fn.body)
+        except ReturnSignal:
+            pass
+        finally:
+            self._depth -= 1
+
+    def iter_event(self, program: ast.Program, event: str):
+        """Coroutine entry: run an event as a generator that yields sleep-seconds
+        (coro mode). The scheduler drives this; sync callers use run_event."""
+        self.ctx.active_event = event
+        for stmt in program.body:
+            if isinstance(stmt, ast.FuncDef):
+                self.ctx.functions[stmt.name] = stmt
+        for stmt in program.body:
+            if isinstance(stmt, ast.FuncDef):
+                continue
+            try:
+                yield from self._gx(stmt)
+            except (BreakSignal, ContinueSignal, ReturnSignal):
+                pass  # stray control-flow outside a loop is a no-op
 
     def _st_ExprStmt(self, node):
         if node.expr is not None:
             self.eval(node.expr)
-
-    def _st_If(self, node):
-        if to_bool(self.eval(node.cond)):
-            self.exec_block(node.then)
-        elif node.els is not None:
-            self.exec_block(node.els)
-
-    def _st_While(self, node):
-        self._loop_depth += 1
-        try:
-            while to_bool(self.eval(node.cond)):
-                self._step()  # guard empty-body loops too
-                try:
-                    self.exec_block(node.body)
-                except BreakSignal:
-                    break
-                except ContinueSignal:
-                    continue
-        finally:
-            self._loop_depth -= 1
-
-    def _st_For(self, node):
-        if node.init is not None:
-            self.exec(node.init)
-        self._loop_depth += 1
-        try:
-            while node.cond is None or to_bool(self.eval(node.cond)):
-                self._step()  # guard empty-body loops too
-                try:
-                    self.exec_block(node.body)
-                except BreakSignal:
-                    break
-                except ContinueSignal:
-                    pass
-                if node.post is not None:
-                    self.exec(node.post)
-        finally:
-            self._loop_depth -= 1
-
-    def _st_With(self, node):
-        obj = self.eval(node.obj)
-        prev = self.ctx.this_obj
-        self.ctx.this_obj = obj
-        try:
-            self.exec_block(node.body)
-        finally:
-            self.ctx.this_obj = prev
 
     def _st_FuncDef(self, node):
         self.ctx.functions[node.name] = node
@@ -162,9 +219,6 @@ class Interpreter:
             raise ContinueSignal()
         raise ReturnSignal()
 
-    def _st_UserCall(self, node):
-        self._call_user(node.name)
-
     def _st_Assign(self, node):
         value = self.eval(node.value)
         if node.op != "=":
@@ -175,16 +229,7 @@ class Interpreter:
     def _st_Command(self, node):
         name = node.name
         if name == "sleep":
-            # We can't truly suspend. Inside a loop, `sleep` yields by breaking
-            # the enclosing loop (so wait-loops like
-            # `while(!hasweapon(x)){ ...; sleep .05; }` don't spin to the step
-            # budget). OUTSIDE a loop it's a no-op so a sequential `sleep 1; foo`
-            # still runs foo — a BreakSignal there would abort the rest of the
-            # enclosing if-block (this is what stopped NPC 162's game-start from
-            # firing level.vase/level.active after its sleeps).
-            if self._loop_depth > 0:
-                raise BreakSignal()
-            return
+            return  # handled in _gx (suspends in coro mode / yields the loop)
         if name in _VAR_COMMANDS:
             self._exec_var_command(node)
             return
@@ -457,18 +502,11 @@ class Interpreter:
         return 0.0 if v is UNSET else v
 
     def _call_user(self, name):
-        fn = self.ctx.functions.get(name)
-        if fn is None:
-            return 0.0
-        if self._depth >= _MAX_CALL_DEPTH:
-            raise RuntimeError("GS1 max call depth exceeded")
-        self._depth += 1
-        try:
-            self.exec_block(fn.body)
-        except ReturnSignal:
+        # Sync call (expression context, e.g. x = myfunc()): drain the generator
+        # body. A sleep inside a function called from an expression can't suspend
+        # (no scheduler in expression eval), so it falls back to the sync no-op.
+        for _ in self._gcall_user(name):
             pass
-        finally:
-            self._depth -= 1
         return 0.0
 
     # -- variable resolution ----------------------------------------------
