@@ -1,0 +1,45 @@
+function fib(n) {
+  if (n < 2) {
+    return n;
+  }
+  return fib(n - 1) + fib(n - 2);
+}
+
+function outer(a) {
+  return helper(a) * 2;
+}
+
+function helper(a) {
+  return a + 1;
+}
+
+function noReturn() {
+  temp.x = 5;
+}
+
+function chainAssign() {
+  temp.a = temp.b = temp.c = 7;
+  return temp.a + temp.b + temp.c;
+}
+
+function preIncr() {
+  temp.i = 5;
+  temp.j = ++temp.i;
+  return temp.i * 100 + temp.j;
+}
+
+function postIncr() {
+  temp.i = 5;
+  temp.j = temp.i++;
+  return temp.i * 100 + temp.j;
+}
+
+function decrTest() {
+  temp.i = 5;
+  temp.i--;
+  return temp.i;
+}
+
+function defaultParam(a, b) {
+  return a @ "|" @ b;
+}

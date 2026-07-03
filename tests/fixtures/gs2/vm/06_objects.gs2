@@ -1,0 +1,49 @@
+function setThis() {
+  this.counter = 41;
+  this.counter++;
+  return this.counter;
+}
+
+function readThis() {
+  return this.counter;
+}
+
+function thisString() {
+  this.label = "hello";
+  return this.label;
+}
+
+function makeObj() {
+  temp.o = new TStaticVar();
+  temp.o.x = 3;
+  temp.o.y = 4;
+  return temp.o.x * temp.o.y;
+}
+
+function withBlock() {
+  temp.o = new TStaticVar();
+  with (temp.o) {
+    x = 10;
+    y = 20;
+  }
+  return temp.o.x + temp.o.y;
+}
+
+function nestedMember() {
+  temp.o = new TStaticVar();
+  temp.o.inner = new TStaticVar();
+  temp.o.inner.v = 99;
+  return temp.o.inner.v;
+}
+
+function objType() {
+  temp.n = 5;
+  temp.s = "x";
+  temp.arr = {1};
+  return temp.n.type() * 100 + temp.s.type() * 10 + temp.arr.type();
+}
+
+function globalVar() {
+  someGlobal = 123;
+  return someGlobal;
+}

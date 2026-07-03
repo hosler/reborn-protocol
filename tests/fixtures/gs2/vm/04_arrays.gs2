@@ -1,0 +1,89 @@
+function literalSum() {
+  temp.arr = {10, 20, 30};
+  return temp.arr[0] + temp.arr[1] + temp.arr[2];
+}
+
+function arrSize() {
+  temp.arr = {1, 2, 3, 4};
+  return temp.arr.size();
+}
+
+function arrAssign() {
+  temp.arr = {0, 0, 0};
+  temp.arr[1] = 42;
+  return temp.arr[1];
+}
+
+function arrAdd() {
+  temp.arr = {1};
+  temp.arr.add(2);
+  temp.arr.add(3);
+  return temp.arr.size() * 100 + temp.arr[2];
+}
+
+function arrDelete() {
+  temp.arr = {1, 2, 3};
+  temp.arr.delete(1);
+  return temp.arr.size() * 100 + temp.arr[1];
+}
+
+function arrInsert() {
+  temp.arr = {1, 3};
+  temp.arr.insert(1, 2);
+  return temp.arr[1];
+}
+
+function arrReplace() {
+  temp.arr = {1, 2, 3};
+  temp.arr.replace(1, 99);
+  return temp.arr[1];
+}
+
+function arrRemove() {
+  temp.arr = {5, 6, 7};
+  temp.arr.remove(6);
+  return temp.arr.size() * 100 + temp.arr[1];
+}
+
+function arrIndex() {
+  temp.arr = {"a", "b", "c"};
+  return temp.arr.index("b");
+}
+
+function subArr() {
+  temp.arr = {1, 2, 3, 4, 5};
+  temp.s = temp.arr.subarray(1, 3);
+  return temp.s.size() * 100 + temp.s[0];
+}
+
+function forEachSum() {
+  temp.arr = {2, 4, 8};
+  temp.total = 0;
+  for (temp.v : temp.arr) {
+    temp.total += temp.v;
+  }
+  return temp.total;
+}
+
+function inArray(v) {
+  temp.arr = {"cat", "dog"};
+  if (v in temp.arr) {
+    return 1;
+  }
+  return 0;
+}
+
+function newArray() {
+  temp.arr = new[5];
+  return temp.arr.size();
+}
+
+function arrayLen() {
+  temp.arr = {7, 8};
+  return arraylen(temp.arr);
+}
+
+function strJoinArr() {
+  temp.arr = {1, 2, 3};
+  return "" @ temp.arr;
+}

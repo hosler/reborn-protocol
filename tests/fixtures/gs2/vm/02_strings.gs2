@@ -1,0 +1,55 @@
+function concat(a, b) {
+  return a @ "-" @ b;
+}
+
+function upperLen(s) {
+  return s.length();
+}
+
+function subStr(s) {
+  return s.substring(2, 3);
+}
+
+function subToEnd(s) {
+  return s.substring(2, -1);
+}
+
+function findPos(s, sub) {
+  return s.pos(sub);
+}
+
+function startsEnds(s) {
+  temp.a = s.starts("he");
+  temp.b = s.ends("lo");
+  return temp.a + temp.b;
+}
+
+function trimIt(s) {
+  return s.trim();
+}
+
+function charAt(s, i) {
+  return s.charat(i);
+}
+
+function tokenCount(s) {
+  temp.toks = s.tokenize(",");
+  return temp.toks.size();
+}
+
+function secondToken(s) {
+  temp.toks = s.tokenize(",");
+  return temp.toks[1];
+}
+
+function fmt(a, b) {
+  return format("x=%d y=%s", a, b);
+}
+
+function charOf(n) {
+  return char(n);
+}
+
+function numToStr(n) {
+  return "" @ n;
+}

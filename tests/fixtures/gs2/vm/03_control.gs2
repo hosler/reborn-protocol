@@ -1,0 +1,97 @@
+function ifElse(n) {
+  if (n > 10) {
+    return "big";
+  } else if (n > 5) {
+    return "mid";
+  } else {
+    return "small";
+  }
+}
+
+function whileSum(n) {
+  temp.total = 0;
+  temp.i = 1;
+  while (temp.i <= n) {
+    temp.total += temp.i;
+    temp.i++;
+  }
+  return temp.total;
+}
+
+function forSum(n) {
+  temp.total = 0;
+  for (temp.i = 0; temp.i < n; temp.i++) {
+    temp.total += temp.i;
+  }
+  return temp.total;
+}
+
+function breakContinue(n) {
+  temp.total = 0;
+  for (temp.i = 0; temp.i < n; temp.i++) {
+    if (temp.i == 2) {
+      continue;
+    }
+    if (temp.i == 5) {
+      break;
+    }
+    temp.total += temp.i;
+  }
+  return temp.total;
+}
+
+function switchTest(n) {
+  switch (n) {
+    case 1:
+      return "one";
+    case 2:
+    case 3:
+      return "few";
+    default:
+      return "many";
+  }
+  return "unreachable";
+}
+
+function ternary(n) {
+  return n > 0 ? "pos" : "nonpos";
+}
+
+function logicAnd(a, b) {
+  if (a > 0 && b > 0) {
+    return 1;
+  }
+  return 0;
+}
+
+function logicOr(a, b) {
+  if (a > 0 || b > 0) {
+    return 1;
+  }
+  return 0;
+}
+
+function logicInline(a, b) {
+  return (a > 0 && b > 0);
+}
+
+function notTest(a) {
+  return !a;
+}
+
+function inRange(v) {
+  if (v in |3, 7|) {
+    return 1;
+  }
+  return 0;
+}
+
+function nestedLoops(n) {
+  temp.c = 0;
+  for (temp.i = 0; temp.i < n; temp.i++) {
+    for (temp.j = 0; temp.j < n; temp.j++) {
+      temp.c++;
+    }
+  }
+  return temp.c;
+}

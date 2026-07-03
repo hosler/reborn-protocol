@@ -1,0 +1,35 @@
+function addNums(a, b) {
+  return a + b;
+}
+
+function precedence() {
+  return 2 + 3 * 4 - 6 / 3;
+}
+
+function modulo(a, b) {
+  return a % b;
+}
+
+function power() {
+  return 2 ^ 10;
+}
+
+function powBuiltin(a, b) {
+  return pow(a, b);
+}
+
+function unary(a) {
+  return -a + abs(-3) + int(2.9);
+}
+
+function minMax(a, b) {
+  return min(a, b) * 100 + max(a, b);
+}
+
+function divByZero(a) {
+  return a / 0;
+}
+
+function bitwise() {
+  return (12 & 10) + (12 | 3) + (1 << 4);
+}
