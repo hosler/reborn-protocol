@@ -11,6 +11,7 @@ G-Type Encoding:
 - GINT5: Five bytes for large values (timestamps, CRC32)
 """
 
+import bz2
 import struct
 import zlib
 from typing import Optional, List, Tuple
@@ -481,6 +482,111 @@ class ServerCodec:
     def reset_decode_state(self) -> None:
         """Reset decode state (e.g., for reconnection handling)."""
         self._first_decode = True
+
+
+# =============================================================================
+# Gen3Codec - Single-byte-insertion encryption + zlib compression
+# =============================================================================
+
+class Gen3Codec:
+    """
+    ENCRYPT_GEN_3 codec (client side) - Graal 1.41 - 2.18 era clients.
+
+    Wire behavior (authoritative: gs2lib CEncryption.cpp + GServer
+    IPacketHandler.h/CFileQueue.cpp):
+
+    - client -> server: each packet (WITHOUT its trailing newline) gets ONE
+      byte INSERTED at pos = (iterator & 0xFFFF) % len(packet_with_insertion);
+      iterator advances once per packet (iterator = iterator*0x8088405 + key).
+      The server strips it in parsePacketsFromBundle via CEncryption::decrypt
+      (removeI at pos computed over the received length). Packets are then
+      newline-joined, the bundle zlib-compressed and length-prefixed.
+      The filler must not be '\\n' (would break the server's newline framing);
+      we use ')' like CEncryption::encrypt does.
+    - server -> client: plain zlib bundles, NO per-packet encryption
+      (CFileQueue's ENCRYPT_GEN_3 case compresses but never calls encrypt()).
+    """
+
+    ITERATOR_START = 0x04A80B38
+    MULTIPLIER = 0x8088405
+
+    def __init__(self, encryption_key: int = 0):
+        self.encryption_key = encryption_key & 0xFF
+        self.out_iterator = self.ITERATOR_START
+
+    def set_key(self, key: int) -> None:
+        self.encryption_key = key & 0xFF
+        self.out_iterator = self.ITERATOR_START
+
+    def send_packet(self, data: bytes) -> bytes:
+        """Encode one packet ({id+32}{payload}\\n) into a length-prefixed
+        zlib bundle with the gen-3 insertion applied."""
+        body = data[:-1] if data.endswith(b'\n') else data
+
+        # Advance the LCG once per packet and insert the filler byte. The
+        # server computes the removal position over the RECEIVED length
+        # (len(body) + 1), so the insertion position must use that too.
+        self.out_iterator = (self.out_iterator * self.MULTIPLIER
+                             + self.encryption_key) & 0xFFFFFFFF
+        pos = (self.out_iterator & 0xFFFF) % (len(body) + 1)
+        body = body[:pos] + b')' + body[pos:]
+
+        compressed = zlib.compress(body + b'\n')
+        return struct.pack('>H', len(compressed)) + compressed
+
+    def recv_packet(self, data: bytes) -> Optional[bytes]:
+        """Decode a server bundle: plain zlib, no decryption."""
+        if not data:
+            return None
+        try:
+            return zlib.decompress(data)
+        except Exception:
+            return None
+
+
+# =============================================================================
+# Gen4Codec - Partial packet encryption + bz2 compression
+# =============================================================================
+
+class Gen4Codec:
+    """
+    ENCRYPT_GEN_4 codec (client side) - Graal 2.19 - 2.21 / 3.x era clients.
+
+    Both directions: bundle -> bz2 compress -> XOR-encrypt with the GEN_5 LCG
+    (iterator start 0x4A80B38, limit 4 iterations = first 16 bytes, limit
+    re-armed per bundle via limitFromType(COMPRESS_BZ2)) -> {u16 len}{data}.
+    Unlike GEN_5 there is NO compression-type byte: GEN_4 is always bz2
+    (gs2lib CFileQueue.cpp ENCRYPT_GEN_4 / GServer IPacketHandler.h
+    processPacketBundle).
+    """
+
+    def __init__(self, encryption_key: int = 0):
+        self.encryption_key = encryption_key
+        self.in_codec = RebornEncryption(encryption_key)
+        self.out_codec = RebornEncryption(encryption_key)
+
+    def set_key(self, key: int) -> None:
+        self.encryption_key = key
+        self.in_codec.reset(key)
+        self.out_codec.reset(key)
+
+    def send_packet(self, data: bytes) -> bytes:
+        """Encode packet bundle: bz2 + partial XOR, no type byte."""
+        compressed = bz2.compress(data)
+        self.out_codec.limit_from_type(CompressionType.BZ2)
+        encrypted = self.out_codec.encrypt(compressed)
+        return struct.pack('>H', len(encrypted)) + encrypted
+
+    def recv_packet(self, data: bytes) -> Optional[bytes]:
+        """Decode a server bundle: partial XOR then bz2 decompress."""
+        if not data:
+            return None
+        self.in_codec.limit_from_type(CompressionType.BZ2)
+        decrypted = self.in_codec.decrypt(data)
+        try:
+            return bz2.decompress(decrypted)
+        except Exception:
+            return None
 
 
 # =============================================================================

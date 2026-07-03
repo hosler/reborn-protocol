@@ -249,7 +249,7 @@ class PLO(IntEnum):
     UPDATEPACKAGEDONE = 106    # Update package done
     BOARDLAYER = 107           # Extra board layer
     UNKNOWN109 = 109           # Unknown
-    UNKNOWN111 = 111           # Unknown
+    SETNETCOOKIE = 111         # {STR cookie} - set net cookie (IEnums.h PLO_SETNETCOOKIE)
     UNKNOWN124 = 124           # Unknown (RC3 player flags?)
     NPCBYTECODE = 131          # Compiled NPC script
     UNKNOWN132 = 132           # Unknown (unique, unhandled by 6.037)
@@ -281,7 +281,8 @@ class PLO(IntEnum):
     GHOSTTEXT = 173            # Ghost mode text
     GHOSTICON = 174            # Ghost mode icon
     SHOOT = 175                # Shoot (unhandled by 6.037)
-    FULLSTOP = 176             # Full stop (hides HUD, stops input)
+    DISABLECLASSICMODE = 176   # Disable classic mode (turns off old game mechanics; IEnums.h PLO_DISABLECLASSICMODE)
+    FULLSTOP = 176             # Deprecated alias for DISABLECLASSICMODE (old pyReborn name)
     FULLSTOP2 = 177            # Full stop 2 (unhandled by 5.07+)
     SERVERWARP = 178           # Server warp
     RPGWINDOW = 179            # RPG window
@@ -290,8 +291,8 @@ class PLO(IntEnum):
     LISTPROCESSES = 182        # List processes
     UNKNOWN183 = 183           # Unknown
     UNKNOWN184 = 184           # Unknown (screenshots?, unhandled by 6.037)
-    UNKNOWN185 = 185           # Unknown
-    UNKNOWN186 = 186           # Unknown
+    BOARDHEIGHTS = 185         # Level height overrides (gmap terrain)
+    BOARDMODIFY2 = 186         # Board modification (gmap: mapX/mapY + tile delta)
     UPDATEPACKAGEISUPDATED = 187  # Update package is updated
     NC_CLASSDELETE = 188       # Class delete
     MOVE2 = 189                # Move 2
@@ -300,9 +301,9 @@ class PLO(IntEnum):
     NC_WEAPONGET = 192         # Weapon get
     UNKNOWN193 = 193           # Unknown (5-byte int?, unhandled by 6.037)
     CLEARWEAPONS = 194         # Clear weapons
-    UNKNOWN195 = 195           # Unknown (ganis?)
+    LOADGANI = 195             # {GCHAR len}{gani}{"SETBACKTO <ani>"} - load gani (IEnums.h PLO_LOADGANI)
     SERVERLISTCONNECTED = 196  # List server is connected (blank packet)
-    UNKNOWN197 = 197           # Unknown (NPC registration, offline cache)
+    LOADSCRIPT = 197           # {type,name,save[,desKey,crc]}[bytecode] - script header/bytecode (IEnums.h PLO_LOADSCRIPT)
     UNKNOWN198 = 198           # Unknown
 
 

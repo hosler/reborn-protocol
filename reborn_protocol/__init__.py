@@ -41,6 +41,8 @@ from .codec import (
     PacketBuffer,
     Gen1Codec,
     Gen2Codec,
+    Gen3Codec,
+    Gen4Codec,
     Gen5Codec,
     ServerCodec,
 )
@@ -74,6 +76,8 @@ __all__ = [
     "PacketBuffer",
     "Gen1Codec",
     "Gen2Codec",
+    "Gen3Codec",
+    "Gen4Codec",
     "Gen5Codec",
     "ServerCodec",
 ]
