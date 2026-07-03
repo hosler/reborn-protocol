@@ -660,13 +660,28 @@ def _aindexof(a):
 
 
 def _lindexof(a):
+    # GServer-v2's fn_lindexof (GS1Functions.cpp) trims each item and the
+    # needle and compares with plain `==` — no case folding (unlike
+    # strequals/strcontains/startswith, which use findi/equalsi).
     if len(a) < 2:
         return -1.0
-    needle = to_str(a[0]).strip().lower()
+    needle = to_str(a[0]).strip()
     for i, item in enumerate(to_str(a[1]).split(",")):
-        if item.strip().lower() == needle:
+        if item.strip() == needle:
             return float(i)
     return -1.0
+
+
+def _sin(x):
+    # GServer-v2's fn_sin (GS1Functions.cpp) only evaluates std::sin(value)
+    # for value in [0, pi]; anything outside that range returns 0 rather than
+    # the full periodic sine. fn_cos has no such restriction. Bomber's own
+    # eye_bomber mallet-UI Draw() folds `this.p` into [0,1] before multiplying
+    # by pi specifically to stay inside this window, confirming scripts are
+    # written expecting the clamp.
+    if x < 0 or x > math.pi:
+        return 0.0
+    return math.sin(x)
 
 
 _PURE = {
@@ -674,7 +689,7 @@ _PURE = {
     "random": _f_random,
     "abs": _f1(abs),
     "int": _f1(lambda x: float(int(x))),       # truncate toward zero
-    "sin": _f1(math.sin),
+    "sin": _f1(_sin),
     "cos": _f1(math.cos),
     "tan": _f1(math.tan),
     "arctan": _f1(math.atan),
@@ -697,8 +712,10 @@ _PURE = {
     "strequals": lambda self, a: 1.0 if len(a) > 1 and to_str(a[0]).lower() == to_str(a[1]).lower() else 0.0,
     "strcontains": lambda self, a: 1.0 if len(a) > 1 and to_str(a[1]).lower() in to_str(a[0]).lower() else 0.0,
     "startswith": lambda self, a: 1.0 if len(a) > 1 and to_str(a[0]).lower().startswith(to_str(a[1]).lower()) else 0.0,
-    # indexof(substring, str) -> position of substring in str (note arg order)
-    "indexof": lambda self, a: float(to_str(a[1]).lower().find(to_str(a[0]).lower())) if len(a) > 1 else -1.0,
+    # indexof(substring, str) -> position of substring in str (note arg order).
+    # Unlike strequals/strcontains/startswith (equalsi/findi, case-insensitive
+    # in GServer-v2), fn_indexof uses plain std::string::find — case-sensitive.
+    "indexof": lambda self, a: float(to_str(a[1]).find(to_str(a[0]))) if len(a) > 1 else -1.0,
     "sarraylen": lambda self, a: float(to_str(a[0]).count(",") + 1) if a else 0.0,
     "lindexof": lambda self, a: _lindexof(a),
     # arrays

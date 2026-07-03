@@ -141,6 +141,22 @@ class Lexer:
         self.mode_stack: list[str] = []
         self.states: deque[_State] = deque()
         self.brace_count = 0
+        self.brace_stack: list[int] = []
+        # Depth of '{...}' array/set literals currently open in an
+        # expression-like mode. GServer's grammar (and this port, faithfully)
+        # has no bracket-depth tracking for '{' '}' the way it does for '('
+        # ')' (brace_count above): a '}' or ',' is treated as ending the
+        # *command's* argument list whenever canCmdPop() is true, with no
+        # regard for whether it is actually closing a '{a,b,c}' literal
+        # nested inside that argument's expression. In practice this desyncs
+        # the command's remaining argument-type queue (each comma inside the
+        # literal wrongly consumes one argument-type char) and can leak
+        # brace_count, corrupting unrelated later parens in the same
+        # statement (e.g. a subsequent #v(...) call). Real scripts do use
+        # '{...}' set/array literals inside command/messagecode arguments
+        # (`showani2 ...,(this.z in {.75,1.25}),...`), so track literal depth
+        # here and treat ',' / '}' as plain punctuation while inside one.
+        self.array_lit_depth = 0
         self.before: deque[Token] = deque()
         self.after: deque[Token] = deque()
         self.out: list[Token] = []
@@ -165,11 +181,26 @@ class Lexer:
     def push_command(self, arguments: str):
         self.states.append(_State(arguments, POP_COMMAND, True))
         self.mode_stack.append(self.mode)  # pushMode(dummy) saves current mode
+        # brace_count counts *plain* grouping parens still open in the
+        # current command/function/messagecode's own argument expression, so
+        # that its own terminating ')' can be told apart from a nested
+        # grouping paren's ')'. It must be scoped per pushed state (like
+        # `mode` is, via mode_stack) rather than a single flat counter:
+        # otherwise an outer, still-open grouping paren (e.g. the '(' in
+        # `showani2 1000+(strtofloat(#p(0))+...),...`) leaks into a nested
+        # function/messagecode call (`strtofloat(...)`, `#p(...)`) parsed
+        # while it's still open, and the inner call's own ')' gets
+        # misread as merely closing the outer grouping paren instead of
+        # terminating the inner call.
+        self.brace_stack.append(self.brace_count)
+        self.brace_count = 0
         self.pop_next_mode()
 
     def push_array_access(self):
         self.states.append(_State("P", POP_ARRAYINDEX, False))
         self.mode_stack.append(self.mode)
+        self.brace_stack.append(self.brace_count)
+        self.brace_count = 0
         self.pop_next_mode()
 
     def pop_next_mode(self, terminate_early=False):
@@ -180,6 +211,7 @@ class Lexer:
             st.arguments = ""
         if st.arguments == "":
             self.mode = self.mode_stack.pop()
+            self.brace_count = self.brace_stack.pop()
             self.states.pop()
             return
         c = st.arguments[0]
@@ -442,6 +474,14 @@ class Lexer:
             return Token(EOF, "", self.pos)
         c = self.text[self.pos]
 
+        if c == "{":
+            self.array_lit_depth += 1
+            self.pos += 1
+            return Token("TOKEN_BRACE_LEFT", "{", self.pos - 1)
+        if c == "}" and self.array_lit_depth > 0:
+            self.array_lit_depth -= 1
+            self.pos += 1
+            return Token("TOKEN_BRACE_RIGHT", "}", self.pos - 1)
         if c == "}" and self._can_cmd_pop():
             self.emit_before(END)
             self.pop_next_mode(True)
@@ -452,7 +492,7 @@ class Lexer:
             self.pos += 1
             return Token(END, ";", self.pos - 1)
         if c == ")":
-            if not plain_parens and self._can_func_pop() and self.brace_count == 0:
+            if not plain_parens and self.array_lit_depth == 0 and self._can_func_pop() and self.brace_count == 0:
                 self.pop_next_mode(True)
                 self.pos += 1
                 return Token("TOKEN_PAREN_RIGHT", ")", self.pos - 1)
@@ -461,7 +501,7 @@ class Lexer:
                 self.brace_count -= 1
             return Token("TOKEN_PAREN_RIGHT", ")", self.pos - 1)
         if c == ",":
-            if self._can_comma_pop():
+            if self.array_lit_depth == 0 and self._can_comma_pop():
                 self.pop_next_mode()
             self.pos += 1
             return Token("TOKEN_COMMA", ",", self.pos - 1)
