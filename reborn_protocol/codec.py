@@ -81,7 +81,10 @@ class PacketReader:
         b1 = self.data[self.pos] - 32
         b2 = self.data[self.pos + 1] - 32
         self.pos += 2
-        return (b1 << 7) + b2
+        # Junk bytes below the +32 offset would go negative; a negative value
+        # fed to read_gstring_short's length drove self.pos negative and
+        # corrupted the reader (has_data() true forever, then IndexError).
+        return max(0, (b1 << 7) + b2)
 
     def read_gint3(self) -> int:
         """
@@ -97,7 +100,7 @@ class PacketReader:
         b2 = self.data[self.pos + 1] - 32
         b3 = self.data[self.pos + 2] - 32
         self.pos += 3
-        return (b1 << 14) + (b2 << 7) + b3
+        return max(0, (b1 << 14) + (b2 << 7) + b3)
 
     def read_gint5(self) -> int:
         """
@@ -121,6 +124,7 @@ class PacketReader:
 
     def read_string(self, length: int) -> str:
         """Read a fixed-length string."""
+        length = max(0, length)  # negative length would rewind pos past 0
         if self.pos + length > len(self.data):
             length = len(self.data) - self.pos
         data = self.data[self.pos:self.pos + length]

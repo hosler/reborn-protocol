@@ -37,7 +37,24 @@ BASELINES_ROOT = os.path.join(
     os.path.dirname(__file__), "..", "..", "GServer-v2", "build", "dependencies",
     "fc", "gs2parser-src", "tests", "baselines",
 )
-BASELINE_FILES = sorted(glob.glob(os.path.join(BASELINES_ROOT, "**", "*.bytecode"), recursive=True))
+# Vendored subset of the same corpus (tests/fixtures/gs2_baselines/) so this
+# suite has real baseline coverage even in checkouts without GServer-v2 built
+# alongside it (e.g. CI). Glob picks up both roots; when both are present
+# (full dev checkout) the vendored files are just re-tested, which is
+# harmless.
+VENDORED_BASELINES_ROOT = os.path.join(os.path.dirname(__file__), "fixtures", "gs2_baselines")
+BASELINE_FILES = sorted(
+    glob.glob(os.path.join(BASELINES_ROOT, "**", "*.bytecode"), recursive=True)
+    + glob.glob(os.path.join(VENDORED_BASELINES_ROOT, "**", "*.bytecode"), recursive=True)
+)
+
+
+def _baseline_id(path: str) -> str:
+    """Relative id for a baseline path, against whichever root it's under."""
+    for root in (BASELINES_ROOT, VENDORED_BASELINES_ROOT):
+        if os.path.commonpath([os.path.abspath(path), os.path.abspath(root)]) == os.path.abspath(root):
+            return os.path.relpath(path, root)
+    return path
 
 
 def _decode_fully(data: bytes):
@@ -52,7 +69,7 @@ def _decode_fully(data: bytes):
 
 
 @pytest.mark.skipif(not BASELINE_FILES, reason="gs2parser baselines not present in this checkout")
-@pytest.mark.parametrize("path", BASELINE_FILES, ids=[os.path.relpath(p, BASELINES_ROOT) for p in BASELINE_FILES])
+@pytest.mark.parametrize("path", BASELINE_FILES, ids=[_baseline_id(p) for p in BASELINE_FILES])
 def test_baseline_decodes_cleanly(path):
     with open(path, "rb") as fh:
         data = fh.read()

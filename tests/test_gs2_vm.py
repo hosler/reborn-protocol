@@ -26,7 +26,22 @@ BASELINES_ROOT = os.path.join(
     os.path.dirname(__file__), "..", "..", "GServer-v2", "build", "dependencies",
     "fc", "gs2parser-src", "tests", "baselines",
 )
-BASELINE_FILES = sorted(glob.glob(os.path.join(BASELINES_ROOT, "**", "*.bytecode"), recursive=True))
+# Vendored subset of the same corpus (tests/fixtures/gs2_baselines/) so this
+# suite has real baseline coverage even in checkouts without GServer-v2 built
+# alongside it (e.g. CI).
+VENDORED_BASELINES_ROOT = os.path.join(os.path.dirname(__file__), "fixtures", "gs2_baselines")
+BASELINE_FILES = sorted(
+    glob.glob(os.path.join(BASELINES_ROOT, "**", "*.bytecode"), recursive=True)
+    + glob.glob(os.path.join(VENDORED_BASELINES_ROOT, "**", "*.bytecode"), recursive=True)
+)
+
+
+def _baseline_id(path: str) -> str:
+    """Relative id for a baseline path, against whichever root it's under."""
+    for root in (BASELINES_ROOT, VENDORED_BASELINES_ROOT):
+        if os.path.commonpath([os.path.abspath(path), os.path.abspath(root)]) == os.path.abspath(root):
+            return os.path.relpath(path, root)
+    return path
 
 
 def load(name: str) -> GS2VM:
@@ -389,7 +404,7 @@ def test_gs2_eq():
 
 @pytest.mark.skipif(not BASELINE_FILES, reason="gs2parser baselines not present")
 @pytest.mark.parametrize("path", BASELINE_FILES,
-                         ids=[os.path.relpath(p, BASELINES_ROOT) for p in BASELINE_FILES])
+                         ids=[_baseline_id(p) for p in BASELINE_FILES])
 def test_corpus_executes_without_crash(path):
     """Every baseline script must load, run its toplevel, and survive an
     argless invocation of every function without any exception escaping the
