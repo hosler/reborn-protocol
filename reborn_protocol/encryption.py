@@ -107,17 +107,20 @@ class RebornEncryption:
         else:
             bytes_to_encrypt = min(len(data), self.limit * 4)
 
+        # Pack the iterator once per 4-byte group instead of once per byte
+        # (struct.pack was being called on every iteration even though the
+        # value it produces only changes every 4th byte).
+        iterator_bytes = b""
         for i in range(bytes_to_encrypt):
             if i % 4 == 0:
-                if self.limit == 0:
-                    break
-                # Advance LCG state
+                # Advance LCG state (the self.limit == 0 case already
+                # returned above, so this branch is never dead here)
                 self.iterator = (self.iterator * self.multiplier + self.key) & 0xFFFFFFFF
                 if self.limit > 0:
                     self.limit -= 1
+                iterator_bytes = struct.pack('<I', self.iterator)
 
             # XOR with iterator byte
-            iterator_bytes = struct.pack('<I', self.iterator)
             result[i] ^= iterator_bytes[i % 4]
 
         return bytes(result)

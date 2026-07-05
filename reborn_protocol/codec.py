@@ -12,6 +12,7 @@ G-Type Encoding:
 """
 
 import bz2
+import logging
 import struct
 import zlib
 from typing import Optional, List, Tuple
@@ -22,6 +23,23 @@ from .encryption import (
     compress_data,
     decompress_data,
 )
+
+logger = logging.getLogger(__name__)
+
+# struct.pack('>H', ...) length-prefix field is 16 bits; a bundle bigger than
+# this would raise an unhandled struct.error. Reference (gs2lib
+# CFileQueue.cpp:244-248) tosses oversize packets rather than sending them.
+MAX_PACKET_LEN = 0xFFFF
+
+
+def _frame(payload: bytes) -> Optional[bytes]:
+    """Length-prefix `payload` (u16 big-endian), or None if it's too big to
+    fit the length field. Callers should drop the send on None."""
+    if len(payload) > MAX_PACKET_LEN:
+        logger.warning("dropping oversize packet bundle (%d bytes > %d)",
+                        len(payload), MAX_PACKET_LEN)
+        return None
+    return struct.pack('>H', len(payload)) + payload
 
 
 # =============================================================================
@@ -55,9 +73,10 @@ class PacketReader:
         """
         Read a 2-byte GSHORT value.
         Encoding: ((b1 - 32) << 7) + (b2 - 32)
-        Range: 0-16383
+        Range: 0-28767 (reference: gs2lib CString::readGShort, CString.cpp:1619)
         """
         if self.pos + 1 >= len(self.data):
+            self.pos = len(self.data)  # avoid infinite loop in has_data() readers
             return 0
         b1 = self.data[self.pos] - 32
         b2 = self.data[self.pos + 1] - 32
@@ -67,29 +86,38 @@ class PacketReader:
     def read_gint3(self) -> int:
         """
         Read a 3-byte GINT value.
-        Encoding: ((b1 - 32) << 14) | ((b2 - 32) << 7) | (b3 - 32)
-        Range: 0-2097151
+        Encoding: ((b1 - 32) << 14) + ((b2 - 32) << 7) + (b3 - 32)
+        Range: 0-3682399 (reference: gs2lib CString::readGInt, CString.cpp:1627).
+        Must be + (not |): b2's high bit can overlap b1's low bit at bit 14.
         """
         if self.pos + 2 >= len(self.data):
+            self.pos = len(self.data)  # avoid infinite loop in has_data() readers
             return 0
         b1 = self.data[self.pos] - 32
         b2 = self.data[self.pos + 1] - 32
         b3 = self.data[self.pos + 2] - 32
         self.pos += 3
-        return (b1 << 14) | (b2 << 7) | b3
+        return (b1 << 14) + (b2 << 7) + b3
 
     def read_gint5(self) -> int:
         """
-        Read a 5-byte GINT5 value (for large numbers like timestamps).
-        Encoding: 7-bit per byte, big-endian
+        Read a 5-byte GINT5 value (32-bit range, for timestamps/CRC32).
+        Encoding: 4/7/7/7/7-bit big-endian packing, each byte -32 before
+        folding (reference: gs2lib CString::readGInt5, CString.cpp:1644 —
+        that version folds raw bytes and subtracts a single 0x4081020
+        constant; this is the algebraically equivalent per-byte-offset form,
+        masked to 32 bits to match its unsigned int return).
         """
         if self.pos + 4 >= len(self.data):
+            self.pos = len(self.data)  # avoid infinite loop in has_data() readers
             return 0
-        result = 0
-        for i in range(5):
-            result = (result << 7) | (self.data[self.pos + i] - 32)
+        b0 = self.data[self.pos] - 32
+        b1 = self.data[self.pos + 1] - 32
+        b2 = self.data[self.pos + 2] - 32
+        b3 = self.data[self.pos + 3] - 32
+        b4 = self.data[self.pos + 4] - 32
         self.pos += 5
-        return result
+        return ((b0 << 28) + (b1 << 21) + (b2 << 14) + (b3 << 7) + b4) & 0xFFFFFFFF
 
     def read_string(self, length: int) -> str:
         """Read a fixed-length string."""
@@ -118,11 +146,12 @@ class PacketReader:
         Returns: position in tiles (pixels / 16)
         """
         if self.pos + 1 >= len(self.data):
+            self.pos = len(self.data)  # avoid infinite loop in has_data() readers
             return 0.0
         b1 = self.data[self.pos] - 32
         b2 = self.data[self.pos + 1] - 32
         self.pos += 2
-        raw = (b1 << 7) | b2
+        raw = (b1 << 7) + b2
         pixels = raw >> 1
         if raw & 1:  # Sign bit
             pixels = -pixels
@@ -167,27 +196,65 @@ class PacketBuilder:
         return self
 
     def write_gchar(self, value: int) -> 'PacketBuilder':
-        """Write a GCHAR (value + 32)."""
-        self._data.append((value + 32) & 0xFF)
+        """Write a GCHAR (value + 32, clamped to 223 before the offset).
+        Reference: gs2lib CString::writeGChar (CString.cpp:1519) — values
+        >= 223 pass through WITHOUT the +32 (so 234 must clamp to 223, not
+        wrap mod 256 into '\\n'/0x0A and corrupt newline-framed bundles)."""
+        v = max(0, min(int(value), 223))
+        self._data.append((v + 32) & 0xFF)
         return self
 
     def write_gshort(self, value: int) -> 'PacketBuilder':
-        """Write a 2-byte GSHORT value."""
-        self._data.append(((value >> 7) & 0x7F) + 32)
-        self._data.append((value & 0x7F) + 32)
+        """Write a 2-byte GSHORT value. Max 28767.
+        Reference: gs2lib CString::writeGShort (CString.cpp:1526)."""
+        t = max(0, min(int(value), 28767))
+        b0 = t >> 7
+        if b0 > 223:
+            b0 = 223
+        b1 = t - (b0 << 7)
+        self._data.append((b0 + 32) & 0xFF)
+        self._data.append((b1 + 32) & 0xFF)
         return self
 
     def write_gint3(self, value: int) -> 'PacketBuilder':
-        """Write a 3-byte GINT value."""
-        self._data.append(((value >> 14) & 0x7F) + 32)
-        self._data.append(((value >> 7) & 0x7F) + 32)
-        self._data.append((value & 0x7F) + 32)
+        """Write a 3-byte GINT value. Max 3682399.
+        Reference: gs2lib CString::writeGInt (CString.cpp:1543)."""
+        t = max(0, min(int(value), 3682399))
+        b0 = t >> 14
+        if b0 > 223:
+            b0 = 223
+        t -= b0 << 14
+        b1 = t >> 7
+        if b1 > 223:
+            b1 = 223
+        b2 = t - (b1 << 7)
+        self._data.append((b0 + 32) & 0xFF)
+        self._data.append((b1 + 32) & 0xFF)
+        self._data.append((b2 + 32) & 0xFF)
         return self
 
     def write_gint5(self, value: int) -> 'PacketBuilder':
-        """Write a 5-byte GINT5 value."""
-        for i in range(4, -1, -1):
-            self._data.append(((value >> (i * 7)) & 0x7F) + 32)
+        """Write a 5-byte GINT5 value (32-bit range, 4/7/7/7/7-bit packing).
+        Reference: gs2lib CString::writeGInt5 (CString.cpp:1584)."""
+        t = max(0, min(int(value), 0xFFFFFFFF))
+        b0 = (t >> 28) & 0xFF
+        if b0 > 15:  # capped low: higher would exceed 0xFFFFFFFF
+            b0 = 15
+        t -= b0 << 28
+        b1 = (t >> 21) & 0xFF
+        if b1 > 223:
+            b1 = 223
+        t -= b1 << 21
+        b2 = (t >> 14) & 0xFF
+        if b2 > 223:
+            b2 = 223
+        t -= b2 << 14
+        b3 = (t >> 7) & 0xFF
+        if b3 > 223:
+            b3 = 223
+        b4 = (t - (b3 << 7)) & 0xFF
+        for b in (b0, b1, b2, b3, b4):
+            self._data.append((b + 32) & 0xFF)
         return self
 
     def write_string(self, value: str) -> 'PacketBuilder':
@@ -323,16 +390,15 @@ class Gen5Codec:
         # Choose compression based on size
         compressed, compression_type = compress_data(data)
 
-        # Encrypt
-        packet_codec = RebornEncryption(self.encryption_key)
-        packet_codec.iterator = self.out_codec.iterator
-        packet_codec.limit_from_type(compression_type)
-        encrypted = packet_codec.encrypt(compressed)
-        self.out_codec.iterator = packet_codec.iterator
+        # Encrypt (in place on the persistent codec, which owns the LCG
+        # iterator across calls)
+        self.out_codec.limit_from_type(compression_type)
+        encrypted = self.out_codec.encrypt(compressed)
 
         # Build packet with compression type byte
         packet = bytes([compression_type]) + encrypted
-        return struct.pack('>H', len(packet)) + packet
+        framed = _frame(packet)
+        return framed if framed is not None else b""
 
     def recv_packet(self, data: bytes) -> Optional[bytes]:
         """
@@ -353,7 +419,7 @@ class Gen5Codec:
         if compression_type == 0x78:
             try:
                 return zlib.decompress(data)
-            except:
+            except (zlib.error, OSError):  # corrupt compressed data
                 return None
 
         encrypted_data = data[1:]
@@ -363,17 +429,14 @@ class Gen5Codec:
                                     CompressionType.BZ2]:
             return None
 
-        # Decrypt
-        packet_codec = RebornEncryption(self.encryption_key)
-        packet_codec.iterator = self.in_codec.iterator
-        packet_codec.limit_from_type(compression_type)
-        decrypted = packet_codec.decrypt(encrypted_data)
-        self.in_codec.iterator = packet_codec.iterator
+        # Decrypt (in place on the persistent codec)
+        self.in_codec.limit_from_type(compression_type)
+        decrypted = self.in_codec.decrypt(encrypted_data)
 
         # Decompress
         try:
             return decompress_data(decrypted, compression_type)
-        except:
+        except (zlib.error, OSError):  # corrupt compressed data
             return None
 
 
@@ -419,21 +482,21 @@ class ServerCodec:
         if is_login_response:
             # First response is plain zlib compressed
             compressed = zlib.compress(data)
-            return struct.pack('>H', len(compressed)) + compressed
+            framed = _frame(compressed)
+            return framed if framed is not None else b""
 
         # Normal packet: compress, encrypt, add type byte
         compressed, compression_type = compress_data(data)
 
-        # Encrypt
-        packet_codec = RebornEncryption(self.encryption_key)
-        packet_codec.iterator = self.out_codec.iterator
-        packet_codec.limit_from_type(compression_type)
-        encrypted = packet_codec.encrypt(compressed)
-        self.out_codec.iterator = packet_codec.iterator
+        # Encrypt (in place on the persistent codec, which owns the LCG
+        # iterator across calls)
+        self.out_codec.limit_from_type(compression_type)
+        encrypted = self.out_codec.encrypt(compressed)
 
         # Build packet
         packet = bytes([compression_type]) + encrypted
-        return struct.pack('>H', len(packet)) + packet
+        framed = _frame(packet)
+        return framed if framed is not None else b""
 
     def decode_packet(self, data: bytes) -> Optional[bytes]:
         """
@@ -453,7 +516,7 @@ class ServerCodec:
             self._first_decode = False
             try:
                 return zlib.decompress(data)
-            except:
+            except (zlib.error, OSError):  # corrupt compressed data
                 return None
 
         # Normal packet
@@ -466,17 +529,14 @@ class ServerCodec:
 
         encrypted_data = data[1:]
 
-        # Decrypt
-        packet_codec = RebornEncryption(self.encryption_key)
-        packet_codec.iterator = self.in_codec.iterator
-        packet_codec.limit_from_type(compression_type)
-        decrypted = packet_codec.decrypt(encrypted_data)
-        self.in_codec.iterator = packet_codec.iterator
+        # Decrypt (in place on the persistent codec)
+        self.in_codec.limit_from_type(compression_type)
+        decrypted = self.in_codec.decrypt(encrypted_data)
 
         # Decompress
         try:
             return decompress_data(decrypted, compression_type)
-        except:
+        except (zlib.error, OSError):  # corrupt compressed data
             return None
 
     def reset_decode_state(self) -> None:
@@ -490,7 +550,7 @@ class ServerCodec:
 
 class Gen3Codec:
     """
-    ENCRYPT_GEN_3 codec (client side) - Graal 1.41 - 2.18 era clients.
+    ENCRYPT_GEN_3 codec (client side) - Reborn 1.41 - 2.18 era clients.
 
     Wire behavior (authoritative: gs2lib CEncryption.cpp + GServer
     IPacketHandler.h/CFileQueue.cpp):
@@ -532,7 +592,8 @@ class Gen3Codec:
         body = body[:pos] + b')' + body[pos:]
 
         compressed = zlib.compress(body + b'\n')
-        return struct.pack('>H', len(compressed)) + compressed
+        framed = _frame(compressed)
+        return framed if framed is not None else b""
 
     def recv_packet(self, data: bytes) -> Optional[bytes]:
         """Decode a server bundle: plain zlib, no decryption."""
@@ -550,7 +611,7 @@ class Gen3Codec:
 
 class Gen4Codec:
     """
-    ENCRYPT_GEN_4 codec (client side) - Graal 2.19 - 2.21 / 3.x era clients.
+    ENCRYPT_GEN_4 codec (client side) - Reborn 2.19 - 2.21 / 3.x era clients.
 
     Both directions: bundle -> bz2 compress -> XOR-encrypt with the GEN_5 LCG
     (iterator start 0x4A80B38, limit 4 iterations = first 16 bytes, limit
@@ -575,7 +636,8 @@ class Gen4Codec:
         compressed = bz2.compress(data)
         self.out_codec.limit_from_type(CompressionType.BZ2)
         encrypted = self.out_codec.encrypt(compressed)
-        return struct.pack('>H', len(encrypted)) + encrypted
+        framed = _frame(encrypted)
+        return framed if framed is not None else b""
 
     def recv_packet(self, data: bytes) -> Optional[bytes]:
         """Decode a server bundle: partial XOR then bz2 decompress."""
@@ -618,7 +680,8 @@ class Gen2Codec:
         compressed = zlib.compress(data)
 
         # Return with length prefix
-        return struct.pack('>H', len(compressed)) + compressed
+        framed = _frame(compressed)
+        return framed if framed is not None else b""
 
     def recv_packet(self, data: bytes) -> Optional[bytes]:
         """
@@ -636,7 +699,7 @@ class Gen2Codec:
         # Try zlib decompression first
         try:
             return zlib.decompress(data)
-        except:
+        except (zlib.error, OSError):  # corrupt compressed data
             # If decompression fails, return raw data (might be uncompressed)
             return data
 
