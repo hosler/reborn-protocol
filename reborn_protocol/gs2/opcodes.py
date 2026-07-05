@@ -1,4 +1,4 @@
-"""GS2 (Graal Script 2) bytecode opcode table.
+"""GS2 (Reborn Script 2) bytecode opcode table.
 
 Mirrors GServer-v2/build/dependencies/fc/gs2parser-src/src/opcodes.h exactly
 (same names, same numeric values) -- that header is the authoritative source

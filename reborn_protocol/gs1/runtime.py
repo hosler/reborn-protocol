@@ -26,6 +26,11 @@ NAMESPACES = {
 
 UNSET = object()  # sentinel: variable does not exist
 
+# Cap on script-index-driven array growth (mirrors gs2/vm.py's
+# MAX_ARRAY_INDEX): a scripted `arr[100000000] = 1` must not try to
+# allocate a 100M-element list.
+_MAX_ARRAY_INDEX = 1 << 20
+
 
 # -- control-flow signals ---------------------------------------------------
 class BreakSignal(Exception):
@@ -152,14 +157,15 @@ class VarStore:
         table = self.scopes.get(scope, self.player_flags) if scope else self.player_flags
         if index is not None:
             i = int(index)
-            if i < 0:
-                return  # GS1 ignores negative array indices
+            if i < 0 or i > _MAX_ARRAY_INDEX:
+                return  # GS1 ignores negative/absurd array indices (a
+                        # scripted `arr[100000000] = 1` must not allocate)
             arr = table.get(key)
             if not isinstance(arr, list):
                 arr = []
                 table[key] = arr
-            while len(arr) <= i:
-                arr.append(0.0)
+            if len(arr) <= i:
+                arr.extend([0.0] * (i + 1 - len(arr)))  # one bulk extend, not an append-loop
             arr[i] = value
         else:
             table[key] = value

@@ -72,16 +72,14 @@ PUNCT = {
     ":": "TOKEN_COLON", ".": "TOKEN_PERIOD",
 }
 
-# special-literal name sets (fragments DIR/GENDERS/CARRYNAMES/ITEMNAMES/BADDY/COLORS)
+# DIR is the one special-literal name set actually consulted (see
+# _mode_D's up/left/down/right check). GENDER_NAMES/
+# CARRY_NAMES/ITEM_NAMES used to exist here for the same purpose on the
+# G/U/I literal modes, but were dead (never read by _special_mode) and, when
+# tried as an enforced allow-list, broke real scripts: item/gender/carry
+# literals can also be raw numeric codes (e.g. `lay 5`), and the reference
+# name lists are long/version-dependent, so removed rather than wired up.
 DIR_NAMES = {"up", "left", "down", "right"}
-GENDER_NAMES = {"male", "female"}
-CARRY_NAMES = {"bush", "sign", "vase", "stone", "blackstone", "bomb",
-               "hotbomb", "superbomb", "joltbomb", "hotjoltbomb", "none"}
-ITEM_NAMES = {"greenrupee", "bluerupee", "redrupee", "bombs", "darts", "heart",
-              "glove1", "bow", "bomb", "shield", "sword", "fullheart",
-              "superbomb", "battleaxe", "goldensword", "mirrorshield",
-              "glove2", "lizardshield", "lizardsword", "goldrupee", "fireball",
-              "fireblast", "nukeshot", "joltbomb", "spinattack"}
 
 _REAL = re.compile(r"0x[0-9a-fA-F]+|[0-9]+(?:\.[0-9]+)?|\.[0-9]+")
 _IDENT = re.compile(r"[a-zA-Z0-9_]+")
@@ -355,8 +353,6 @@ class Lexer:
         if c == "{":
             self.pos += 1
             return Token("TOKEN_BRACE_LEFT", "{", self.pos - 1)
-        if c in "([" and False:  # arrays/parens handled below as punct
-            pass
         if c.isalpha() or c == "_":
             return self._default_word()
         if c.isdigit() or (c == "." and self.pos + 1 < self.n and self.text[self.pos + 1].isdigit()):
@@ -531,8 +527,6 @@ class Lexer:
                 return r
         op = self._try_operator()
         if op:
-            if op.type in ASSIGN_OPS and not allow_assign and op.type != "OP_ASSIGN":
-                pass
             return op
         if c in PUNCT:
             self.pos += 1
@@ -577,7 +571,7 @@ class Lexer:
             self.push_array_access()
             return Token("TOKEN_BRACKET_LEFT", "[", self.pos - 1)
         if c == "*":
-            # '*' is a legal flag-name character: Graal stores a string flag's
+            # '*' is a legal flag-name character: Reborn stores a string flag's
             # >223-char overflow in a twin flag whose name ends in '*'
             # (e.g. server.room1 + server.room1*). In variable-name mode it is
             # part of the identifier, not multiplication (that's expr mode).
@@ -733,7 +727,13 @@ class Lexer:
     # =====================================================================
     # Special-literal modes (B/I/C/G/U) and code-body (Z), function-paren (1/2/3)
     # =====================================================================
-    def _special_mode(self, ttype, names):
+    def _special_mode(self, ttype):
+        # No name-set validation here: item/gender/carry literals can also be
+        # raw numeric codes (e.g. `lay 5`), and the reference name lists are
+        # long/version-dependent, so any fixed allow-list here would reject
+        # legitimate scripts (verified: enforcing the old ITEM_NAMES broke
+        # test_lay_spawns_item / test_take_removes_nearby_items). The lexer
+        # just captures the word; the interpreter/host decide what it means.
         if self._skip_ws():
             return None
         if self.pos >= self.n:
@@ -764,19 +764,19 @@ class Lexer:
         raise LexError(f"unexpected char {c!r} in {ttype}", self.pos, self._line)
 
     def _mode_B(self):
-        return self._special_mode(BADDY, None)
+        return self._special_mode(BADDY)
 
     def _mode_I(self):
-        return self._special_mode(ITEM, ITEM_NAMES)
+        return self._special_mode(ITEM)
 
     def _mode_C(self):
-        return self._special_mode(COLOR, None)
+        return self._special_mode(COLOR)
 
     def _mode_G(self):
-        return self._special_mode(GENDER, GENDER_NAMES)
+        return self._special_mode(GENDER)
 
     def _mode_U(self):
-        return self._special_mode(CARRY, CARRY_NAMES)
+        return self._special_mode(CARRY)
 
     def _mode_X(self):
         # storage special case: identifier then pop; or a message code

@@ -8,7 +8,7 @@ GServer-v2/build/dependencies/fc/gs2parser-src/src/codegen/GS2Bytecode.cpp:
     length -- GS2Bytecode.cpp writes it manually after the bytecode segment).
 
 All header/length integers use plain big-endian encoding (encoding::Int32 /
-encoding::Int16 in graalencoding.h), NOT the Graal "+32" variable-length byte
+encoding::Int16 in graalencoding.h), NOT the "+32" variable-length byte
 encoding used elsewhere in the wire protocol (GraalByte/GraalShort/...) --
 that family is never used inside the GS2 container or bytecode stream.
 

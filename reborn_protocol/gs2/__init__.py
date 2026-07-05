@@ -1,4 +1,4 @@
-"""GS2 (Graal Script 2) bytecode container parser, disassembler and VM.
+"""GS2 (Reborn Script 2) bytecode container parser, disassembler and VM.
 
 Mirrors the layout/style of the sibling `reborn_protocol.gs1` package. See
 memory for the build log; ground-truth sources for the bytecode format:

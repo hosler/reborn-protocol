@@ -19,6 +19,15 @@ from .runtime import (Context, Host, MemoryHost, VarStore, UNSET, NAMESPACES,
                       BreakSignal, ContinueSignal, ReturnSignal)
 from .values import to_num, to_str, to_bool, fmt_num
 
+# `tokenize` splits on whitespace only in the reference (GS1Commands.cpp:3137).
+# We additionally split on commas — a deliberate divergence driven by Bomber
+# Arena (bomber.eevul.net:14916), whose room-roster strings ("Join
+# <timer>,host,member,..") and #P<n> gattrib slot lists are comma-separated;
+# without it those scripts can't tokenize their own state. Gated behind this
+# flag (rather than silently reverting) so the choice is visible and a future
+# non-Bomber corpus run can flip it off to check reference-exactness.
+TOKENIZE_SPLITS_ON_COMMA = True
+
 # commands the interpreter handles itself (manipulate the var store)
 _VAR_COMMANDS = {"set", "unset", "setstring", "addstring", "setarray"}
 # commands whose first argument is a message code used as an assignment target
@@ -235,10 +244,12 @@ class Interpreter:
             return
         if name == "tokenize":
             s = to_str(self.eval(node.args[0])) if node.args else ""
-            # GS1 tokenize splits on whitespace AND commas — the bomber's room
-            # strings ("Join <timer>,host,member,..") and slot lists are
+            # See TOKENIZE_SPLITS_ON_COMMA above: the bomber's room strings
+            # ("Join <timer>,host,member,..") and slot lists are
             # comma-separated, and standby NPC 190 reads members via #t(i).
-            self.ctx.tokenize_tokens = s.replace(",", " ").split()
+            if TOKENIZE_SPLITS_ON_COMMA:
+                s = s.replace(",", " ")
+            self.ctx.tokenize_tokens = s.split()
             return
         if name == "tokenize2":
             s = to_str(self.eval(node.args[0])) if node.args else ""
@@ -303,7 +314,7 @@ class Interpreter:
         # (GS1Visitor::visitCompoundString -> trimMutate), which strips the
         # command/argument separator space; internal spacing is preserved.
         s = "".join(self._str_part(p) for p in node.parts).strip()
-        # Graal `name=` value-of idiom applies to the ASSEMBLED string (e.g.
+        # Reborn `name=` value-of idiom applies to the ASSEMBLED string (e.g.
         # server.room#v(RoomID)= -> "server.room1=" -> room1's value).
         vo = self._value_of(s)
         return s if vo is None else vo
@@ -316,7 +327,7 @@ class Interpreter:
         return to_str(self.eval(p))
 
     def _value_of(self, s):
-        """Graal `name=` value-of idiom: a bareword ending in '=' resolves to the
+        """Reborn `name=` value-of idiom: a bareword ending in '=' resolves to the
         variable's VALUE, not the literal text (e.g. strlen(server.room1=) is the
         length of room1's value). Restricted to NAMESPACED refs that EXIST, so
         ordinary string literals ending in '=' (e.g. "Score=") are left alone.

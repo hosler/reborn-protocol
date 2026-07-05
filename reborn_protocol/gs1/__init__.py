@@ -1,4 +1,4 @@
-"""GS1 (Graal Script 1) interpreter for pygserver.
+"""GS1 (Reborn Script 1) interpreter for pygserver.
 
 A faithful Python port of the GServer-v2 C++ ANTLR engine
 (GServer-v2/server/src/scripting/gs1/). See memory: gs1-python-port.

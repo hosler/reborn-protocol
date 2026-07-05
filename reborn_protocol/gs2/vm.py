@@ -7,7 +7,7 @@ Semantics are derived from (in priority order, per the build ground rules):
    layout each construct actually produces (argument order, ArrayStart
    markers, param binding, jump labels, with/foreach protocols, builtin
    signatures in GS2BuiltInFunctions.cpp).
-2. Preagonal's C# GS2Engine (ScriptMachine.cs) as the runtime tiebreaker --
+2. The C# client's GS2Engine (ScriptMachine.cs) as the runtime tiebreaker --
    confirmed OP_JMP is a runtime no-op, OP_FUNC_PARAMS_END binds param names
    (pushed in reverse) against caller args, OP_CALL collects args down to the
    ArrayStart marker and recurses, operands 0xF0-0xF6 attach to the previous
@@ -44,6 +44,12 @@ logger = logging.getLogger(__name__)
 #: sentinel returned by hosts for "builtin not handled here"
 NOT_HANDLED = object()
 
+#: cap on any single array allocation/index-driven growth (arr[100000000]=1
+#: must not try to allocate a 100M-element list). Applied wherever a script
+#: index controls array size: OP_ARRAY_NEW(_MULTIDIM), OP_SETARRAY,
+#: OP_ARRAY_ASSIGN, OP_OBJ_REPLACESTRING.
+MAX_ARRAY_INDEX = 1 << 20
+
 
 class GS2Host:
     """Host interface the VM calls out to. Default implementation is inert;
@@ -69,7 +75,7 @@ class GS2Host:
 
     def get_globals(self) -> Dict[str, Any]:
         """Storage for unqualified variable writes. Hosts may share one dict
-        across scripts (Graal client globals are shared)."""
+        across scripts (Reborn client globals are shared)."""
         raise NotImplementedError
 
 
@@ -578,11 +584,11 @@ class GS2VM:
 
     def _op_array_new(self, frame, instr):
         size = int(to_num(self.deref(frame.stack.pop(), frame))) if frame.stack else 0
-        frame.stack.append([0.0] * max(0, min(size, 1 << 20)))
+        frame.stack.append([0.0] * max(0, min(size, MAX_ARRAY_INDEX)))
 
     def _op_array_new_multidim(self, frame, instr):
         size = int(to_num(self.deref(frame.stack.pop(), frame))) if frame.stack else 0
-        size = max(0, min(size, 1 << 20))
+        size = max(0, min(size, MAX_ARRAY_INDEX))
         arr = self.deref(frame.stack[-1], frame) if frame.stack else None
         if isinstance(arr, list):
             for i, v in enumerate(arr):
@@ -603,7 +609,7 @@ class GS2VM:
     def _op_setarray(self, frame, instr):
         size = int(to_num(self.deref(frame.stack.pop(), frame))) if frame.stack else 0
         target = frame.stack.pop() if frame.stack else None
-        size = max(0, min(size, 1 << 20))
+        size = max(0, min(size, MAX_ARRAY_INDEX))
         cur = self.deref(target, frame)
         arr = list(cur) if isinstance(cur, list) else []
         if len(arr) < size:
@@ -960,7 +966,7 @@ class GS2VM:
         arr = self.deref(target, frame)
         if isinstance(arr, list):
             i = int(to_num(idx))
-            if i >= 0:
+            if 0 <= i <= MAX_ARRAY_INDEX:
                 if i >= len(arr):
                     arr.extend([0.0] * (i + 1 - len(arr)))
                 arr[i] = value
@@ -970,7 +976,7 @@ class GS2VM:
             # auto-vivify: this.arr[0] = x on an unset member
             new = []
             i = int(to_num(idx))
-            if i >= 0:
+            if 0 <= i <= MAX_ARRAY_INDEX:
                 new.extend([0.0] * (i + 1))
                 new[i] = value
             self._write_ref(target, new, frame)
@@ -1038,11 +1044,10 @@ class GS2VM:
         idx = int(to_num(self.deref(frame.stack.pop(), frame))) if frame.stack else 0
         value = self.deref(frame.stack.pop(), frame) if frame.stack else None
         arr = self.deref(frame.stack.pop(), frame) if frame.stack else None
-        if isinstance(arr, list):
+        if isinstance(arr, list) and 0 <= idx <= MAX_ARRAY_INDEX:
             if idx >= len(arr):
                 arr.extend([0.0] * (idx + 1 - len(arr)))
-            if idx >= 0:
-                arr[idx] = value
+            arr[idx] = value
 
     def _op_obj_insertstring(self, frame, instr):
         # obj.insert(index, value) with CMD_REVERSE_ARGS: stack [obj, value, index]
