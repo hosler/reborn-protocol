@@ -39,3 +39,7 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# native GS2 compiler binary + its build tree (built via tests/tools/build_gs2test.sh)
+tests/tools/gs2test
+tests/tools/.gs2test-build/
