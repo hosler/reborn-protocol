@@ -262,7 +262,20 @@ class Interpreter:
             # than the expanded value (mirrors GS1Visitor's prop-ref handling).
             code = _raw_msgcode(node.args[0])
             first = code if code is not None else self.eval(node.args[0])
-            args = [first] + [self.eval(a) for a in node.args[1:]]
+            # While the VALUE args are evaluated, the command's own target is
+            # the current source for bare context-sensitive message codes
+            # (#C0..#C7): GServer's processBuiltInCommand pushSource()es the
+            # NPC for setcharprop / the acting player for setplayerprop
+            # BEFORE argument collection (GS1Commands.cpp:430-496). This is
+            # what makes the corpus idiom `setcharprop #C0,#C0` a self
+            # round-trip on the NPC rather than a player-colour read.
+            prev = getattr(self.ctx, "charprop_source", None)
+            self.ctx.charprop_source = ("npc" if name == "setcharprop"
+                                        else "player")
+            try:
+                args = [first] + [self.eval(a) for a in node.args[1:]]
+            finally:
+                self.ctx.charprop_source = prev
             self.ctx.host.call_command(name, args, self.ctx)
             return
         args = [self.eval(a) for a in node.args]

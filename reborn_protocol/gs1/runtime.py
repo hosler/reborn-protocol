@@ -189,3 +189,9 @@ class Context:
         self.tokenize_tokens = []     # set by `tokenize`, read by #t(i)
         self.steps = 0                # statement budget guard (infinite loops)
         self.max_steps = 200_000
+        # While a setcharprop/setplayerprop VALUE argument is being evaluated
+        # this is "npc"/"player" — the command's own target, which is what a
+        # bare context-sensitive message code (#C0..#C7) resolves against.
+        # Mirrors the pushSource in GServer's processBuiltInCommand
+        # (GS1Commands.cpp:430-453). None everywhere else.
+        self.charprop_source = None
