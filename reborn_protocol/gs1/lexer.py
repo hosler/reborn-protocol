@@ -329,6 +329,37 @@ class Lexer:
                 return Token(ttype, _OP_CANON.get(lit, lit), start)
         return None
 
+    def _scan_quoted_string(self):
+        """Scan a '"'-delimited string literal in expression context.
+
+        Real scripts assign/compare quoted literals outside of any
+        command's string-typed argument (`this.chat = "Welcome!";`,
+        `setcharani("sit","");`, `if (a == "b")`) — GS1 has no such
+        literal in the ANTLR grammar, but real Reborn Classic scripts use
+        it, so this reproduces what players' clients accept: the quotes
+        are delimiters (stripped, not part of the token text — unlike
+        S-mode's account, which keeps them literal), a doubled `""` is a
+        literal embedded quote, and an unterminated string runs to EOF
+        rather than erroring.
+        """
+        start = self.pos
+        self.pos += 1  # skip opening quote
+        chunks = []
+        chunk_start = self.pos
+        while self.pos < self.n:
+            if self.text[self.pos] == '"':
+                if self.pos + 1 < self.n and self.text[self.pos + 1] == '"':
+                    chunks.append(self.text[chunk_start:self.pos + 1])
+                    self.pos += 2
+                    chunk_start = self.pos
+                    continue
+                break
+            self.pos += 1
+        chunks.append(self.text[chunk_start:self.pos])
+        if self.pos < self.n:
+            self.pos += 1  # skip closing quote
+        return Token(STRING, "".join(chunks), start)
+
     # =====================================================================
     # DEFAULT mode (top level: commands, keywords, control flow)
     # =====================================================================
@@ -359,6 +390,8 @@ class Lexer:
             r = self._try_real()
             if r:
                 return r
+        if c == '"':
+            return self._scan_quoted_string()
         op = self._try_operator()
         if op:
             return op
@@ -525,6 +558,8 @@ class Lexer:
             r = self._try_real()
             if r:
                 return r
+        if c == '"':
+            return self._scan_quoted_string()
         op = self._try_operator()
         if op:
             return op
