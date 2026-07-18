@@ -59,15 +59,21 @@ _MAX_LOOP_ITERATIONS = 10000
 
 
 class Interpreter:
-    def __init__(self, ctx: Context):
+    def __init__(self, ctx: Context, resumable: bool = False):
         self.ctx = ctx
         self._depth = 0
         self._loop_depth = 0   # enclosing while/for nesting (for sleep semantics)
         # Cooperative-coroutine mode: when True, `sleep N` SUSPENDS the script
         # (the generator yields N seconds; a scheduler resumes it later). When
         # False (pygserver / tests / expression-context calls) sleep can't
-        # suspend, so it falls back to break-the-enclosing-loop / no-op.
-        self._coro = False
+        # suspend, so it falls back to break-the-enclosing-loop / no-op (the
+        # tradeoff this used to document unconditionally -- see
+        # run_event_resumable / ResumableExecution below for the opt-in fix:
+        # true suspend-and-resume across while/for/function bodies, matching
+        # GServer-v2's m_sleepCallStack). Sync callers (run/run_event/exec,
+        # the pygserver and expression-call paths) are UNCHANGED by that
+        # addition -- they never set this, so they keep today's behavior.
+        self._coro = resumable
 
     # -- entry -------------------------------------------------------------
     def run(self, program: ast.Program):
@@ -101,6 +107,22 @@ class Interpreter:
                 self.exec(stmt)
             except (BreakSignal, ContinueSignal, ReturnSignal):
                 pass  # stray control-flow outside a loop is a no-op
+
+    def run_event_resumable(self, program: ast.Program, event: str) -> "ResumableExecution":
+        """Opt-in entry point for hosts that want real suspend/resume `sleep`
+        semantics instead of the sync break-the-loop fallback (see the _coro
+        comment on __init__). Forces coro mode on THIS Interpreter -- create
+        a fresh Interpreter per resumable run (don't share one across
+        concurrent runs; _depth/_loop_depth and ctx.this_obj/charprop_source
+        are live interpreter/ctx state for the duration a run is suspended).
+
+        Returns a ResumableExecution already advanced to its first sleep (or
+        to completion, if the script never sleeps). The caller drives it back
+        to completion with repeated .resume() calls, e.g. from the host's own
+        timeout-event scheduler -- see ResumableExecution and interp.py:186.
+        """
+        self._coro = True
+        return ResumableExecution(self, self.iter_event(program, event))
 
     # -- statements --------------------------------------------------------
     def _step(self):
@@ -245,7 +267,21 @@ class Interpreter:
         if node.op != "=":
             cur = self.get_ref(node.target)
             value = self._compound(node.op, cur, value)
+        elif self._is_bare_timeout(node.target):
+            # `timeout = x` (plain assignment only -- upstream gates this on
+            # OP_ASSIGN, so `timeout += 1` does NOT clear) erases any
+            # resumable sleep pending on this ctx. See Context.sleep_cancelled.
+            self.ctx.sleep_cancelled = True
         self.set_ref(node.target, value)
+
+    def _is_bare_timeout(self, ref):
+        """True if `ref` is the unscoped, unindexed identifier `timeout`
+        (not this.timeout/server.timeout/timeout[i]) -- the one GS1Visitor
+        special-cases for the sleep-stack-clearing rule."""
+        if len(ref.parts) != 1:
+            return False
+        part = ref.parts[0]
+        return not part.index and self._part_name(part) == "timeout"
 
     def _st_Command(self, node):
         name = node.name
@@ -696,6 +732,82 @@ class Interpreter:
         self._store_set(ref, cur)
 
 
+class ResumableExecution:
+    """One GS1 event execution that can suspend at `sleep` and be resumed
+    later by the host -- the opt-in fix for the break-the-loop tradeoff
+    documented on Interpreter.__init__ (interp.py:~62). Construct via
+    Interpreter.run_event_resumable(); don't build directly.
+
+    Design: GServer-v2 (GS1Visitor.cpp) implements this with an EXPLICIT
+    sleep call-stack (`m_sleepCallStack`, a vector of (parse-node, child-index)
+    pairs) that a Block/While/For visitor snapshots by hand when a
+    sleep_exception unwinds through it, and restores by re-entering the tree
+    at the saved node/index on the next TIMEOUT event. We get the same
+    resume-in-the-middle-of-a-loop behaviour for free from Python's own
+    generator machinery: `iter_event` is written as a tree-walking generator
+    (`Interpreter._gx`/`_gblock`), so the position within nested
+    while/for/with()/user-function bodies IS the suspended generator frame --
+    calling `next()` on it again resumes exactly after the `sleep` statement,
+    with loop counters and the with()-source/call-stack (both plain Python
+    locals or ctx.this_obj, restored by the paused try/finally on resume)
+    intact. No hand-rolled position bookkeeping needed; statement-level
+    granularity comes for free from `sleep` only ever appearing as its own
+    statement (matches upstream: "statement boundaries are fine, no need for
+    sub-expression resume").
+
+    Attributes:
+      pending_sleep -- seconds the script asked to sleep for, or None if the
+                        execution has finished (`done` is True).
+      done           -- True once the generator is exhausted (StopIteration)
+                        or this pending sleep was cancelled by a `timeout = x`
+                        assignment elsewhere on the same ctx.
+    """
+
+    def __init__(self, interp: "Interpreter", gen):
+        self._interp = interp
+        self._gen = gen
+        self.pending_sleep = None
+        self.done = False
+        self._advance()
+
+    def _advance(self):
+        ctx = self._interp.ctx
+        try:
+            self.pending_sleep = next(self._gen)
+        except StopIteration:
+            self.done = True
+            self.pending_sleep = None
+        else:
+            # A `timeout = x` that happened DURING the statements we just ran
+            # (e.g. `timeout = x; sleep 1;` in the same continuation) is this
+            # execution's own doing, not a stale cross-execution cancel -- it
+            # must not cancel the sleep it just produced. Upstream's own
+            # clear is a no-op there too: by the time a script resumes,
+            # whatever it might clear was already emptied by the act of
+            # resuming (GS1Visitor::execute, m_sleepCallStack.clear() at the
+            # top of the TIMEOUT-resume branch). Only a cancel that arrives
+            # while we sit SUSPENDED, between this and the next resume() call,
+            # is a real "something else reprogrammed my timer" signal.
+            ctx.sleep_cancelled = False
+
+    def resume(self):
+        """Continue from the saved `sleep` point. A no-op once `done`. If a
+        `timeout = x` assignment cancelled this pending sleep while we were
+        suspended (see Context.sleep_cancelled), this call consumes the
+        cancellation, marks the execution done and stops it -- the script
+        never gets a chance to run past its sleep, matching GS1Visitor's
+        cleared-stack behaviour."""
+        if self.done:
+            return
+        if self._interp.ctx.sleep_cancelled:
+            self._interp.ctx.sleep_cancelled = False
+            self.done = True
+            self.pending_sleep = None
+            self._gen.close()
+            return
+        self._advance()
+
+
 UNSET_VAL = UNSET  # alias for readability in this module
 
 
@@ -871,3 +983,12 @@ def run_event(source: str, event: str, host: Host = None, ctx: Context = None) -
     ctx = ctx or Context(host or MemoryHost())
     Interpreter(ctx).run_event(parse(source), event)
     return ctx
+
+
+def run_event_resumable(source: str, event: str, host: Host = None,
+                         ctx: Context = None) -> ResumableExecution:
+    """Opt-in entry point: like run_event, but `sleep` suspends instead of
+    breaking its loop; drive the returned ResumableExecution's .resume() to
+    continue past each sleep. See ResumableExecution / Interpreter.__init__."""
+    ctx = ctx or Context(host or MemoryHost())
+    return Interpreter(ctx).run_event_resumable(parse(source), event)

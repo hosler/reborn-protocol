@@ -226,3 +226,16 @@ class Context:
         # Mirrors the pushSource in GServer's processBuiltInCommand
         # (GS1Commands.cpp:430-453). None everywhere else.
         self.charprop_source = None
+        # Set by a plain (non-compound) `timeout = x` assignment (see
+        # Interpreter._st_Assign); mirrors GS1Visitor's
+        # `m_sleepCallStack.clear()` on the same idiom (GS1Visitor.cpp
+        # visitStatementAssignment, npcprogramming.doc 5.4) -- reassigning the
+        # NPC's timer erases any resumable sleep left pending by a DIFFERENT,
+        # already-suspended execution sharing this ctx. A resumable execution
+        # checks this flag when the host calls resume() (interp.ResumableExecution);
+        # it is *not* checked mid-flight, so a script's own `timeout = x;
+        # sleep 1;` doesn't cancel the sleep it's about to register itself
+        # (upstream's own clear is a no-op there too -- by the time a script
+        # resumes, the stack it might clear was already emptied by the resume
+        # itself). Irrelevant/no-op for non-resumable (sync) execution.
+        self.sleep_cancelled = False
