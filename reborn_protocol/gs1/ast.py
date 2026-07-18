@@ -111,8 +111,8 @@ class Postfix:
 
 @dataclass
 class InExpr:
-    value: Any
-    rng: Any
+    values: list  # one or more exponentiation-level expressions (`a,b in ...`)
+    rng: Any       # RangeLit, or an expression evaluating to an array
 
 
 @dataclass
@@ -174,3 +174,5 @@ class SpecialLit:
 class RangeLit:
     lo: Any
     hi: Any
+    lo_incl: bool = True  # opening delimiter: '|' inclusive, '<' exclusive
+    hi_incl: bool = True  # closing delimiter: '|' inclusive, '>' exclusive

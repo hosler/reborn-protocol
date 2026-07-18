@@ -15,6 +15,8 @@ See memory: gs1-python-port.
 """
 from __future__ import annotations
 
+import math
+
 from .values import to_num, to_str, to_bool
 
 # recognised namespace prefixes -> internal scope key
@@ -24,12 +26,25 @@ NAMESPACES = {
     "serverr": "server", "level": "level", "global": "global",
 }
 
-UNSET = object()  # sentinel: variable does not exist
+# Reserved constants (GS1Lexer.g4 RESERVEDCONSTANTS / GS1Visitor.cpp
+# visitLiteral, commit 66813d8b): a bare, unscoped identifier matching one of
+# these names is ALWAYS the constant, never a flag/var lookup — GServer's
+# ANTLR grammar lexes 'pi'/'allstats'/'allfeatures' as a dedicated
+# RESERVEDCONSTANTS token (case-sensitive, lowercase only) that the parser
+# resolves via primaryExpression's `literal_literal` alternative, which is
+# tried before `identifier_access`; a *scoped* reference (this.pi) is
+# unaffected, since that always requires the multi-token compound_identifier
+# path. Assigning to a bare reserved name is rejected upstream
+# (visitCompoundIdentifier throws "reserved keyword"); this port just ignores
+# the write (see interp.py set_ref) rather than raising, matching this
+# module's general lenient-script style.
+RESERVED_CONSTANTS = {
+    "pi": math.pi,
+    "allstats": float(0xFFFF),
+    "allfeatures": float(0xFFFF),
+}
 
-# Cap on script-index-driven array growth (mirrors gs2/vm.py's
-# MAX_ARRAY_INDEX): a scripted `arr[100000000] = 1` must not try to
-# allocate a 100M-element list.
-_MAX_ARRAY_INDEX = 1 << 20
+UNSET = object()  # sentinel: variable does not exist
 
 
 # -- control-flow signals ---------------------------------------------------
@@ -146,26 +161,42 @@ class VarStore:
     def get(self, scope, key, index=None):
         table = self.scopes.get(scope, self.player_flags) if scope else self.player_flags
         v = table.get(key, UNSET)
+        if index is not None:
+            # Indexed array access (GameVariable::get<double>(index) / the
+            # negative-index special case in GS1Visitor::visitIdentifierValue,
+            # GS1Visitor.cpp): a NEGATIVE index never touches storage at all --
+            # it returns a fresh detached 0.0, even if the array (or variable)
+            # doesn't exist. A non-negative index into a missing/empty/non-array
+            # value also yields 0.0 (nothing to clamp into). Otherwise an
+            # out-of-bounds positive index CLAMPS to index 0 -- it does NOT
+            # grow the array (GS1 arrays are fixed-size: only `setarray`/an
+            # array literal resizes them).
+            i = int(index)
+            if i < 0:
+                return 0.0
+            if v is UNSET or not isinstance(v, list) or not v:
+                return 0.0
+            if i >= len(v):
+                i = 0
+            return v[i]
         if v is UNSET:
             return UNSET
-        if index is not None and isinstance(v, list):
-            i = int(index)
-            return v[i] if 0 <= i < len(v) else 0.0
         return v
 
     def set(self, scope, key, value, index=None):
         table = self.scopes.get(scope, self.player_flags) if scope else self.player_flags
         if index is not None:
+            # Mirrors `get` above: negative, or into a missing/empty/non-array
+            # value, is a silent no-op; positive-OOB clamps to index 0 rather
+            # than growing the array.
             i = int(index)
-            if i < 0 or i > _MAX_ARRAY_INDEX:
-                return  # GS1 ignores negative/absurd array indices (a
-                        # scripted `arr[100000000] = 1` must not allocate)
+            if i < 0:
+                return
             arr = table.get(key)
-            if not isinstance(arr, list):
-                arr = []
-                table[key] = arr
-            if len(arr) <= i:
-                arr.extend([0.0] * (i + 1 - len(arr)))  # one bulk extend, not an append-loop
+            if not isinstance(arr, list) or not arr:
+                return
+            if i >= len(arr):
+                i = 0
             arr[i] = value
         else:
             table[key] = value

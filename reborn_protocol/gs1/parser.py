@@ -308,23 +308,38 @@ class Parser:
         return node
 
     def parse_in(self):
+        # inExpression: exponentiationExpression
+        #   ((TOKEN_COMMA exponentiationExpression)* OP_IN (range_literal | primaryExpression))?
+        # The comma-separated list ("2,3 in |1,4|" -- ALL values must be in
+        # range) only belongs to us if an 'in' eventually follows; otherwise
+        # those commas are someone else's (a command/array-literal separator),
+        # so back out and let the caller see them.
         node = self.parse_exponent()
+        mark = self.i
+        values = [node]
+        while self.accept("TOKEN_COMMA"):
+            values.append(self.parse_exponent())
         if self.at("OP_IN"):
             self.next()
             if self.at("TOKEN_PIPE", "OP_LESS"):
-                node = ast.InExpr(node, self.parse_range())
-            else:
-                node = ast.InExpr(node, self.parse_primary())
+                return ast.InExpr(values, self.parse_range())
+            return ast.InExpr(values, self.parse_primary())
+        self.i = mark
         return node
 
     def parse_range(self):
-        self.next()  # '|' or '<'
+        open_tok = self.next()  # '|' or '<'
+        lo_incl = open_tok.type == "TOKEN_PIPE"
         lo = self.parse_expression()
         self.eat("TOKEN_COMMA")
         hi = self.parse_expression()
-        if not (self.accept("TOKEN_PIPE") or self.accept("OP_GREAT")):
+        if self.accept("TOKEN_PIPE"):
+            hi_incl = True
+        elif self.accept("OP_GREAT"):
+            hi_incl = False
+        else:
             raise ParseError("expected '|' or '>' to close range", self.peek())
-        return ast.RangeLit(lo, hi)
+        return ast.RangeLit(lo, hi, lo_incl, hi_incl)
 
     def parse_exponent(self):
         node = self.parse_unary()

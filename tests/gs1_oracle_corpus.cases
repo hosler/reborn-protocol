@@ -1,0 +1,243 @@
+=====CASE truthiness-number
+if (created) {
+  this.n5 = 0; if (5) this.n5 = 1;
+  this.n0 = 0; if (0) this.n0 = 1;
+  this.and = 5 && 2;
+  this.or = 5 || 2;
+  this.notzero = !0;
+  this.not42 = !42;
+}
+=====CASE truthiness-string
+if (created) {
+  // NOTE: a bare `#s(x)` message code used directly as a condition/RHS is
+  // NOT the same as reading the variable itself -- confirmed empirically
+  // against the oracle: `if (#s(this.s))` is false even for a non-empty
+  // this.s, and `this.v = #s(this.s);` doesn't even store "hello" in this.v
+  // ('=' assignment always numeric-coerces its RHS, GS1Visitor.cpp
+  // visitStatementAssignment; only `setstring` truly stores text). A bare
+  // variable reference (`if (this.s)`) is the real, working flag-truthiness
+  // idiom, so that's what this case tests.
+  setstring this.s,hello;
+  this.full = 0; if (this.s) this.full = 1;
+  setstring this.blank,;
+  this.empty = 0; if (this.blank) this.empty = 1;
+  this.strcond = 0; if (strequals(#s(this.s),hello)) this.strcond = 1;
+}
+=====CASE epsilon-equality
+if (created) {
+  this.close = (0.10001 == 0.1);
+  this.far = (0.101 == 0.1);
+  this.ne = (0.10001 != 0.1);
+  this.lt = (0.10001 < 0.1);
+  this.gt = (0.10001 > 0.1);
+}
+=====CASE modulo-pow
+if (created) {
+  this.m1 = -7 % 3;
+  this.m2 = 7 % -3;
+  this.m3 = 7.9 % 3;
+  this.p1 = 2^10;
+  this.p2 = 2^3^2;
+  this.p3 = 9^0.5;
+}
+=====CASE array-oob-clamp
+if (created) {
+  this.arr = {10,20,30};
+  this.oob = this.arr[7];
+  this.neg = this.arr[-1];
+  this.arr[-1] = 99;
+  this.after = this.arr[0];
+}
+=====CASE array-empty
+if (created) {
+  setarray this.e, 0;
+  // NOTE: `this.oob = this.e[3];` (a bare index-into-empty-array read,
+  // assigned directly) is deliberately avoided here: GServer-v2's
+  // GS1Visitor::visitIdentifierValue falls back to wrapping a COPY of the
+  // whole (empty) array variable when GameVariable::get<double> fails
+  // (empty array => nullopt), so a direct assignment of that expression
+  // copies the container itself rather than yielding a plain 0 -- an
+  // obscure GameVariable-wrapper quirk this tree-walking port doesn't model.
+  // Forcing scalar coercion via `+ 0` (arithmetic always getCopy<double>s)
+  // sidesteps it and tests the meaningful part: OOB-into-empty is 0.
+  this.oob = this.e[3] + 0;
+}
+=====CASE setarray-preserve
+if (created) {
+  this.arr = {1,2,3};
+  setarray this.arr, 5;
+  this.len5 = arraylen(this.arr);
+  setarray this.arr, 2;
+  this.len2 = arraylen(this.arr);
+  this.keep = this.arr[1];
+}
+=====CASE string-arith-coercion
+if (created) {
+  setstring this.s,25;
+  this.fromvar = 3 + this.s;
+  this.fromfunc = 3 + strtofloat(#s(this.s));
+  this.plusbool = 3 + true;
+}
+=====CASE ranges
+if (created) {
+  this.in1 = 0; if (5 in |1,5|) this.in1 = 1;
+  this.in2 = 0; if (5 in <1,5|) this.in2 = 1;
+  this.in3 = 0; if (5 in <1,5>) this.in3 = 1;
+  this.rev = 0; if (3 in |5,1|) this.rev = 1;
+  this.two = 0; if (2,3 in |1,4|) this.two = 1;
+  this.twoout = 0; if (2,9 in |1,4|) this.twoout = 1;
+}
+=====CASE getdir-diagonals
+if (created) {
+  this.r  = getdir(1,0);
+  this.ur = getdir(1,-1);
+  this.ul = getdir(-1,-1);
+  this.l  = getdir(-1,0);
+  this.dl = getdir(-1,1);
+  this.dr = getdir(1,1);
+  this.zero = getdir(0,0);
+}
+=====CASE getdir-vertical
+if (created) {
+  this.u = getdir(0,-1);
+  this.d = getdir(0,1);
+}
+=====CASE int-conversion
+if (created) {
+  this.i1 = int(3.7);
+  this.i2 = int(-3.7);
+  this.a = {10,20,30};
+  this.idx = this.a[1.9];
+}
+=====CASE loop-cap
+if (created) {
+  this.n = 0;
+  while (1==1) { this.n = this.n + 1; if (this.n > 20000) break; }
+}
+=====CASE for-loop
+if (created) {
+  this.sum = 0;
+  for (this.i = 0; this.i < 5; this.i ++) this.sum = this.sum + this.i;
+}
+=====CASE ternary-equality-in-expr
+if (created) {
+  this.t = (3 > 2 ? 7 : 9);
+  this.eqexpr = 0; if (this.t = 7) this.eqexpr = 1;
+  this.alt1 = 0; if (5 => 5) this.alt1 = 1;
+  this.alt2 = 0; if (5 <> 6) this.alt2 = 1;
+}
+=====CASE compound-assign
+if (created) {
+  this.x = 10;
+  this.x += 5;
+  this.x -= 3;
+  this.x *= 2;
+  this.x /= 4;
+  this.y = 2;
+  this.y ^= 3;
+  this.z = 17;
+  this.z %= 5;
+}
+=====CASE postfix-incdec
+if (created) {
+  this.a = 5;
+  this.a ++;
+  this.b = 5;
+  this.b --;
+}
+=====CASE user-function
+if (created) {
+  this.before = 1;
+  callfunc();
+}
+function callfunc() {
+  this.called = 1;
+}
+=====CASE strings-ops
+if (created) {
+  setstring this.s,abcdef;
+  this.len = strlen(#s(this.s));
+  this.starts = startswith(abc,#s(this.s));
+  this.contains = strcontains(#s(this.s),cde);
+  setstring this.sub,#e(1,3,#s(this.s));
+}
+=====CASE tokenize-codes
+if (created) {
+  tokenize a b c;
+  this.count = tokenscount;
+  setstring this.t0,#t(0);
+  setstring this.t2,#t(2);
+}
+=====CASE vecx-vecy
+if (created) {
+  this.vx0 = vecx(0); this.vy0 = vecy(0);
+  this.vx1 = vecx(1); this.vy1 = vecy(1);
+  this.vx2 = vecx(2); this.vy2 = vecy(2);
+  this.vx3 = vecx(3); this.vy3 = vecy(3);
+}
+=====CASE abs-min-max
+if (created) {
+  this.ab = abs(-4.5);
+  this.mn = min(3,-2);
+  this.mx = max(3,-2);
+}
+=====CASE empty-string-math
+if (created) {
+  setstring this.empty,;
+  this.r = 5 + strtofloat(#s(this.empty));
+}
+=====CASE num-to-string-format
+if (created) {
+  setstring this.a,#v(42);
+  setstring this.b,#v(42.5);
+  setstring this.c,#v(2/3);
+}
+=====CASE pi-simple
+if (created) {
+  this.a = pi;
+}
+=====CASE pi-in-call
+if (created) {
+  this.b = sin(pi/2);
+  this.c = cos(0);
+}
+=====CASE not-on-string
+if (created) {
+  setstring this.s,hello;
+  this.notstr = !#s(this.s);
+  this.notnum = !5;
+}
+=====CASE array-write-oob-clamp
+if (created) {
+  this.arr = {1,2,3};
+  this.arr[7] = 99;
+  this.first = this.arr[0];
+  this.second = this.arr[1];
+}
+=====CASE array-write-negative-noop-on-empty
+if (created) {
+  setarray this.e, 0;
+  this.e[-1] = 5;
+  this.elen = arraylen(this.e);
+}
+=====CASE bool-roundtrip-arith
+if (created) {
+  this.b = (3 == 3);
+  this.c = this.b + 1;
+  this.d = (3 == 4);
+  this.e = this.d + 1;
+}
+=====CASE string-equality-coerces-to-zero
+if (created) {
+  setstring this.p,foo;
+  setstring this.q,bar;
+  this.streq = 0; if (#s(this.p) == #s(this.q)) this.streq = 1;
+}
+=====MATH math-precedence
+2 + 3 * 4 ^ 2
+=====MATH math-unary
+-3 ^ 2
+=====MATH math-paren-div
+(7 + 3) / 4
+=====STR str-msgcodes
+result #v(6*7) end

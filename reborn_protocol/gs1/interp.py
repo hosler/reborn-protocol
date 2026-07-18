@@ -16,8 +16,10 @@ import random as _random
 from . import ast
 from .parser import parse
 from .runtime import (Context, Host, MemoryHost, VarStore, UNSET, NAMESPACES,
+                      RESERVED_CONSTANTS,
                       BreakSignal, ContinueSignal, ReturnSignal)
-from .values import to_num, to_str, to_bool, fmt_num
+from .values import (to_num, to_str, fmt_num,
+                     gs1_num, gs1_truthy, is_double_zero)
 
 # `tokenize` splits on whitespace only in the reference (GS1Commands.cpp:3137).
 # We additionally split on commas — a deliberate divergence driven by Bomber
@@ -49,6 +51,11 @@ def _raw_msgcode(node):
             return codes[0].code
     return None
 _MAX_CALL_DEPTH = 100
+# ScriptEngineGS1.h maximumLoopCount: while/for hard-caps at 10000 iterations
+# and then silently falls out, regardless of the loop's own condition. This is
+# PER LOOP (each while/for statement gets its own budget) and is separate
+# from/in addition to ctx.max_steps, which remains a whole-script backstop.
+_MAX_LOOP_ITERATIONS = 10000
 
 
 class Interpreter:
@@ -125,7 +132,7 @@ class Interpreter:
         self._step()
         t = type(node).__name__
         if t == "If":
-            if to_bool(self.eval(node.cond)):
+            if gs1_truthy(self.eval(node.cond)):
                 yield from self._gblock(node.then)
             elif node.els is not None:
                 yield from self._gblock(node.els)
@@ -133,8 +140,10 @@ class Interpreter:
             yield from self._gblock(node.body)
         elif t == "While":
             self._loop_depth += 1
+            iterations = 0
             try:
-                while to_bool(self.eval(node.cond)):
+                while iterations < _MAX_LOOP_ITERATIONS and gs1_truthy(self.eval(node.cond)):
+                    iterations += 1
                     self._step()  # guard empty-body loops too
                     try:
                         yield from self._gblock(node.body)
@@ -148,8 +157,11 @@ class Interpreter:
             if node.init is not None:
                 self.exec(node.init)
             self._loop_depth += 1
+            iterations = 0
             try:
-                while node.cond is None or to_bool(self.eval(node.cond)):
+                while (iterations < _MAX_LOOP_ITERATIONS
+                       and (node.cond is None or gs1_truthy(self.eval(node.cond)))):
+                    iterations += 1
                     self._step()  # guard empty-body loops too
                     try:
                         yield from self._gblock(node.body)
@@ -285,9 +297,12 @@ class Interpreter:
         # flags/strings/arrays live in the var store, NOT in host built-ins
         name, args = node.name, node.args
         if name == "set":
+            # fn_set (GS1Commands.cpp): `flag->assign<bool>(true)` -- a real
+            # bool, not 1.0 (a bare number is never truthy in `if (flag)`
+            # under GS1's flag-condition semantics, see gs1_truthy).
             ref = args[0]
             if self._store_get(ref) is UNSET_VAL:  # set only marks presence
-                self._store_set(ref, 1.0)
+                self._store_set(ref, True)
         elif name == "unset":
             self.unset_ref(args[0])
         elif name == "setstring":
@@ -296,15 +311,31 @@ class Interpreter:
             # `setstring client.b_temp,"a","b","",""` -> "a,b,," and
             # `setstring server.bombrm_N,Join <t>,<list>` keeps the player list).
             val = ",".join(to_str(self.eval(a)) for a in args[1:])
-            if val == "":
+            # fn_setstring (GS1Commands.cpp): for client./server.(r) flags an
+            # empty value DELETES the flag; every other scope (this., temp.,
+            # local., level., global., bare) just assigns the empty string
+            # like any other value (`var->assign<std::string>(text)`
+            # unconditionally) -- it does NOT unset. this.empty="" is a real,
+            # present empty string, distinct from an unset flag.
+            scope, _key, _indices, _names = self._resolve(args[0])
+            if val == "" and scope in ("client", "server"):
                 self.unset_ref(args[0])
             else:
                 self._store_set(args[0], val)
         elif name == "addstring":
             self._array_append(args[0], to_str(self.eval(args[1])) if len(args) > 1 else "")
         elif name == "setarray":
-            size = int(to_num(self.eval(args[1]))) if len(args) > 1 else 0
-            self._store_set(args[0], [0.0] * max(0, size))
+            # fn_setarray (GS1Commands.cpp, commit f6803352) resizes an
+            # EXISTING array in place, preserving contents and zero-filling
+            # only the new slots; a negative/zero size clamps to an empty
+            # array. If the var doesn't currently hold an array (scalar,
+            # string or unset), it's simply replaced with a fresh zero array.
+            size = max(0, int(to_num(self.eval(args[1])))) if len(args) > 1 else 0
+            cur = self._store_get(args[0])
+            new = [0.0] * size
+            if isinstance(cur, list):
+                new[:min(size, len(cur))] = cur[:size]
+            self._store_set(args[0], new)
 
     # -- expressions -------------------------------------------------------
     def eval(self, node):
@@ -317,7 +348,7 @@ class Interpreter:
         return node.value
 
     def _ex_Bool(self, node):
-        return 1.0 if node.value else 0.0
+        return bool(node.value)
 
     def _ex_Str(self, node):
         return node.value
@@ -425,98 +456,140 @@ class Interpreter:
     def _ex_UnaryOp(self, node):
         v = self.eval(node.operand)
         if node.op == "-":
-            return -to_num(v)
+            return -gs1_num(v)
         if node.op == "+":
-            return to_num(v)
+            return gs1_num(v)
         if node.op == "!":
-            return 0.0 if to_bool(v) else 1.0
+            # NOT a flag test: GS1's unary `!` always numeric-coerces its
+            # operand and tests it near zero (DoubleIsZero), so it is
+            # deliberately NOT De Morgan-consistent with `if`/`&&`/`||`
+            # (which use gs1_truthy: a number is never truthy there, but
+            # `!42` is still false, not true).
+            return is_double_zero(gs1_num(v))
         return v
 
     def _ex_Postfix(self, node):
-        cur = to_num(self.get_ref(node.operand))
+        cur = gs1_num(self.get_ref(node.operand))
         new = cur + 1 if node.op == "++" else cur - 1
         self.set_ref(node.operand, new)
         return cur
 
     def _ex_Ternary(self, node):
-        return self.eval(node.a) if to_bool(self.eval(node.cond)) else self.eval(node.b)
+        return self.eval(node.a) if gs1_truthy(self.eval(node.cond)) else self.eval(node.b)
 
     def _ex_InExpr(self, node):
-        v = to_num(self.eval(node.value))
+        # fn_visitExpressionIn (GS1Visitor.cpp): ALL values on the left must
+        # satisfy the range/membership test (comma list is an "all of" test,
+        # not "any of"); a range's bounds may be given in either order (a
+        # reversed range like |5,1| just flips which comparison is <=/>=),
+        # and each side is independently inclusive ('|') or exclusive
+        # ('<'/'>').
+        checks = [gs1_num(self.eval(v)) for v in node.values]
         rng = node.rng
         if isinstance(rng, ast.RangeLit):
-            lo = to_num(self.eval(rng.lo))
-            hi = to_num(self.eval(rng.hi))
-            return 1.0 if lo <= v <= hi else 0.0
+            lo = gs1_num(self.eval(rng.lo))
+            hi = gs1_num(self.eval(rng.hi))
+            ascending = lo < hi
+            for check in checks:
+                if ascending:
+                    left_ok = (lo <= check) if rng.lo_incl else (lo < check)
+                    right_ok = (check <= hi) if rng.hi_incl else (check < hi)
+                else:
+                    left_ok = (lo >= check) if rng.lo_incl else (lo > check)
+                    right_ok = (check >= hi) if rng.hi_incl else (check > hi)
+                if not (left_ok and right_ok):
+                    return False
+            return True
         container = self.eval(rng)
-        if isinstance(container, (list, tuple)):
-            return 1.0 if any(to_num(x) == v for x in container) else 0.0
-        return 0.0
+        if not isinstance(container, (list, tuple)):
+            return False
+        for check in checks:
+            if not any(gs1_num(x) == check for x in container):
+                return False
+        return True
 
     def _ex_BinOp(self, node):
         op = node.op
         if op == "&&":
-            return 1.0 if (to_bool(self.eval(node.left)) and to_bool(self.eval(node.right))) else 0.0
+            return gs1_truthy(self.eval(node.left)) and gs1_truthy(self.eval(node.right))
         if op == "||":
-            return 1.0 if (to_bool(self.eval(node.left)) or to_bool(self.eval(node.right))) else 0.0
+            return gs1_truthy(self.eval(node.left)) or gs1_truthy(self.eval(node.right))
         a = self.eval(node.left)
         b = self.eval(node.right)
-        # GS1 arithmetic/comparison is numeric (strings coerce to their numeric
-        # value); string compares use strequals(). == / != also compare arrays.
+        # GS1 arithmetic/comparison ALWAYS coerces via gs1_num: a bool is
+        # 1.0/0.0, a number is itself, but a plain string NEVER numeric-parses
+        # here (GameValue::getCopy<double> ignores text) -- `3 + this.s` where
+        # this.s holds "25" is 3, not 28. String content compares go through
+        # strequals()/strcontains(), not these operators.
         if op == "+":
-            return to_num(a) + to_num(b)
+            return gs1_num(a) + gs1_num(b)
         if op == "-":
-            return to_num(a) - to_num(b)
+            return gs1_num(a) - gs1_num(b)
         if op == "*":
-            return to_num(a) * to_num(b)
+            return gs1_num(a) * gs1_num(b)
         if op == "/":
-            d = to_num(b)
-            return to_num(a) / d if d != 0 else 0.0
+            d = gs1_num(b)
+            return gs1_num(a) / d if d != 0 else 0.0
         if op == "%":
-            d = to_num(b)
-            return math.fmod(to_num(a), d) if d != 0 else 0.0
+            return self._mod(gs1_num(a), gs1_num(b))
         if op == "^":
             try:
-                return float(to_num(a) ** to_num(b))
+                return float(gs1_num(a) ** gs1_num(b))
             except (ValueError, OverflowError):
                 return 0.0
         if op in ("==", "="):
-            return 1.0 if self._eq(a, b) else 0.0
+            return self._eq(a, b)
         if op == "!=":
-            return 0.0 if self._eq(a, b) else 1.0
+            return not self._eq(a, b)
         if op == "<":
-            return 1.0 if to_num(a) < to_num(b) else 0.0
+            return gs1_num(a) < gs1_num(b)
         if op == ">":
-            return 1.0 if to_num(a) > to_num(b) else 0.0
+            return gs1_num(a) > gs1_num(b)
         if op == "<=":
-            return 1.0 if to_num(a) <= to_num(b) else 0.0
+            return gs1_num(a) <= gs1_num(b)
         if op == ">=":
-            return 1.0 if to_num(a) >= to_num(b) else 0.0
+            return gs1_num(a) >= gs1_num(b)
         raise RuntimeError(f"unknown operator {op}")
 
     @staticmethod
+    def _mod(a, b):
+        # Both operands truncate to an integer FIRST (C int64_t semantics:
+        # `static_cast<int64_t>(result) % static_cast<int64_t>(right)`), THEN
+        # modulo -- so 7.9 % 3 == 1 (7 % 3), not fmod(7.9, 3) == 1.9.
+        # Python's int() truncates toward zero like the C++ cast; math.fmod
+        # (not Python's `%`) then matches C's sign-of-dividend convention.
+        ib = int(b)
+        if ib == 0:
+            return 0.0
+        return math.fmod(int(a), ib)
+
+    @staticmethod
     def _eq(a, b):
+        # ExpressionEquality (GS1Visitor.cpp): array/array is a real
+        # element-wise vector compare; everything else -- including a
+        # string on either side -- coerces through gs1_num (DoublesAreSame,
+        # epsilon 0.0001, CommonTypes.h), so plain string content is never
+        # compared here (use strequals() for that).
         if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
             return list(a) == list(b)
-        return abs(to_num(a) - to_num(b)) < 1e-9
+        return abs(gs1_num(a) - gs1_num(b)) < 0.0001
 
     def _compound(self, op, cur, value):
         base = op[0]
         if base == "+":
-            return to_num(cur) + to_num(value)
+            return gs1_num(cur) + gs1_num(value)
         if base == "-":
-            return to_num(cur) - to_num(value)
+            return gs1_num(cur) - gs1_num(value)
         if base == "*":
-            return to_num(cur) * to_num(value)
+            return gs1_num(cur) * gs1_num(value)
         if base == "/":
-            d = to_num(value)
-            return to_num(cur) / d if d != 0 else 0.0
+            d = gs1_num(value)
+            return gs1_num(cur) / d if d != 0 else 0.0
         if base == "%":
-            d = to_num(value)
-            return math.fmod(to_num(cur), d) if d != 0 else 0.0
+            return self._mod(gs1_num(cur), gs1_num(value))
         if base == "^":
             try:
-                return float(to_num(cur) ** to_num(value))
+                return float(gs1_num(cur) ** gs1_num(value))
             except (ValueError, OverflowError):
                 return 0.0
         return value
@@ -568,9 +641,17 @@ class Interpreter:
         if scope is not None:
             v = self.ctx.vars.get(scope, key, index)
             return UNSET_VAL if v is UNSET else v
-        # bare name that matches the firing event -> its flag reads true
+        # bare reserved constant (pi, allstats, allfeatures) always wins over
+        # any flag/attribute of the same name — see RESERVED_CONSTANTS.
+        if key in RESERVED_CONSTANTS:
+            return RESERVED_CONSTANTS[key]
+        # bare name that matches the firing event -> its flag reads true.
+        # Event names are FLAGS (GS1Visitor's flagStore.get(...)->getCopy<bool>),
+        # so this must be a real bool -- gs1_truthy(1.0) is false, since a
+        # bare number is never truthy in a condition (`if (created)` would
+        # otherwise never fire).
         if key and key == self.ctx.active_event:
-            return 1.0
+            return True
         # bare: built-in attribute first, then player flag/var
         v = self.ctx.host.get_builtin(key, indices, self.ctx)
         if v is not UNSET:
@@ -583,6 +664,10 @@ class Interpreter:
         index = indices[0] if indices else None
         if scope is not None:
             self.ctx.vars.set(scope, key, value, index)
+            return
+        # bare assignment to a reserved constant name is illegal upstream
+        # (GS1Visitor throws "reserved keyword"); ignore rather than raise.
+        if key in RESERVED_CONSTANTS:
             return
         if self.ctx.host.set_builtin(key, value, indices, self.ctx):
             return
@@ -658,19 +743,42 @@ def _getangle(a):
 
 
 def _getdir(a):
-    # intended direction from a delta (the C++ clamp here is buggy; we do the
-    # sensible thing — corpus scripts expect a real direction)
+    # GServer-v2 fn_getdir (GS1Functions.cpp, commit 9e759e9d) is angle-based,
+    # not a cardinal snap: atan2 over the full circle (Y flipped to match the
+    # game's coordinate system), biased to up/down on the diagonals.
+    #   right if angle <  pi/4        up    if angle <= 3*pi/4
+    #   left  if angle <  5*pi/4      down  if angle <= 7*pi/4
+    #   else (>= 7*pi/4)  right
+    #
+    # The compiled reference binary has a verbatim quirk here: its angle is
+    # only computed `if (!DoubleIsZero(dx) || DoubleIsZero(dy))`, so a
+    # pure-vertical delta (dx == 0, dy != 0 -- straight up/down) skips the
+    # atan2 and falls back to the 0.0 default, i.e. BOTH getdir(0,-1) and
+    # getdir(0,1) come out "right" (3.0). That contradicts GServer's own docs
+    # (bin/docs/scripting-gs1-functions.md tables (0,-1)->0, (0,1)->2) and
+    # real player-facing gameplay expectations. Decision: gameplay fidelity
+    # wins over bug-for-bug reference fidelity here, so we always compute the
+    # real angle (matching the docs table) rather than replicate that guard.
+    # See tests/test_gs1_oracle.py KNOWN_UPSTREAM_BUGS["getdir-vertical"] and
+    # corpus case getdir-vertical for the oracle-verified contrast.
     dx = to_num(a[0]) if a else 0.0
     dy = to_num(a[1]) if len(a) > 1 else 0.0
-    ix = max(-1, min(1, round(dx)))
-    iy = max(-1, min(1, round(dy)))
-    if ix == 0 and iy == -1:
-        return 0.0
-    if ix == -1 and iy == 0:
-        return 1.0
-    if ix == 1 and iy == 0:
+    angle = math.atan2(-dy, dx)  # game flips Y; atan2(0,0)==0.0 for dx=dy=0
+    if angle < 0.0:
+        angle += 2 * math.pi
+    angle_ne = math.pi / 4.0
+    angle_nw = math.pi * 3.0 / 4.0
+    angle_sw = math.pi + angle_ne
+    angle_se = math.pi + angle_nw
+    if angle < angle_ne:
         return 3.0
-    return 2.0  # down (also the default)
+    if angle <= angle_nw:
+        return 0.0
+    if angle < angle_sw:
+        return 1.0
+    if angle <= angle_se:
+        return 2.0
+    return 3.0
 
 
 def _aindexof(a):
@@ -733,9 +841,12 @@ _PURE = {
     "strtofloat": lambda self, a: to_num(a[0]) if a else 0.0,
     # GS1 string matching is CASE-INSENSITIVE (GServer-v2 uses equalsi/findi),
     # which the Bomber room states rely on ("Open"/"Join"/"Host" vs open/join).
-    "strequals": lambda self, a: 1.0 if len(a) > 1 and to_str(a[0]).lower() == to_str(a[1]).lower() else 0.0,
-    "strcontains": lambda self, a: 1.0 if len(a) > 1 and to_str(a[1]).lower() in to_str(a[0]).lower() else 0.0,
-    "startswith": lambda self, a: 1.0 if len(a) > 1 and to_str(a[0]).lower().startswith(to_str(a[1]).lower()) else 0.0,
+    "strequals": lambda self, a: len(a) > 1 and to_str(a[0]).lower() == to_str(a[1]).lower(),
+    "strcontains": lambda self, a: len(a) > 1 and to_str(a[1]).lower() in to_str(a[0]).lower(),
+    # startswith(prefix, string) -- checks if STRING starts with PREFIX (note
+    # the arg order: the prefix comes first, matching GS1Functions.cpp's own
+    # doc comment and its `findi(str, prefix) == 0`, str=arguments[1]).
+    "startswith": lambda self, a: len(a) > 1 and to_str(a[1]).lower().startswith(to_str(a[0]).lower()),
     # indexof(substring, str) -> position of substring in str (note arg order).
     # Unlike strequals/strcontains/startswith (equalsi/findi, case-insensitive
     # in GServer-v2), fn_indexof uses plain std::string::find — case-sensitive.
