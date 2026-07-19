@@ -72,6 +72,12 @@ def test_gint3_roundtrip(value):
     assert PacketReader(data).read_gint3() == value
 
 
+@given(value=st.integers(min_value=0, max_value=471347295))
+def test_gint4_roundtrip(value):
+    data = PacketBuilder().write_gint4(value).build()
+    assert PacketReader(data).read_gint4() == value
+
+
 @given(value=st.integers(min_value=0, max_value=0xFFFFFFFF))
 def test_gint5_roundtrip(value):
     data = PacketBuilder().write_gint5(value).build()
@@ -113,12 +119,14 @@ _GTYPE_STRATEGIES = {
     "gchar": st.integers(min_value=0, max_value=223),
     "gshort": st.integers(min_value=0, max_value=28767),
     "gint3": st.integers(min_value=0, max_value=3682399),
+    "gint4": st.integers(min_value=0, max_value=471347295),
     "gint5": st.integers(min_value=0, max_value=0xFFFFFFFF),
 }
 _GTYPE_METHODS = {
     "gchar": ("write_gchar", "read_gchar"),
     "gshort": ("write_gshort", "read_gshort"),
     "gint3": ("write_gint3", "read_gint3"),
+    "gint4": ("write_gint4", "read_gint4"),
     "gint5": ("write_gint5", "read_gint5"),
 }
 

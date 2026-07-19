@@ -102,6 +102,23 @@ class PacketReader:
         self.pos += 3
         return max(0, (b1 << 14) + (b2 << 7) + b3)
 
+    def read_gint4(self) -> int:
+        """
+        Read a 4-byte GINT4 value.
+        Encoding: ((b1-32) << 21) + ((b2-32) << 14) + ((b3-32) << 7) + (b4-32)
+        Range: 0-471347295 (reference: gs2lib CString::readGInt4, CString.cpp:1635).
+        Must be + (not |): capped-byte encodings carry across the 7-bit lanes.
+        """
+        if self.pos + 3 >= len(self.data):
+            self.pos = len(self.data)  # avoid infinite loop in has_data() readers
+            return 0
+        b1 = self.data[self.pos] - 32
+        b2 = self.data[self.pos + 1] - 32
+        b3 = self.data[self.pos + 2] - 32
+        b4 = self.data[self.pos + 3] - 32
+        self.pos += 4
+        return max(0, (b1 << 21) + (b2 << 14) + (b3 << 7) + b4)
+
     def read_gint5(self) -> int:
         """
         Read a 5-byte GINT5 value (32-bit range, for timestamps/CRC32).
@@ -235,6 +252,26 @@ class PacketBuilder:
         self._data.append((b0 + 32) & 0xFF)
         self._data.append((b1 + 32) & 0xFF)
         self._data.append((b2 + 32) & 0xFF)
+        return self
+
+    def write_gint4(self, value: int) -> 'PacketBuilder':
+        """Write a 4-byte GINT4 value. Max 471347295.
+        Reference: gs2lib CString::writeGInt4 (CString.cpp:1562)."""
+        t = max(0, min(int(value), 471347295))
+        b0 = t >> 21
+        if b0 > 223:
+            b0 = 223
+        t -= b0 << 21
+        b1 = t >> 14
+        if b1 > 223:
+            b1 = 223
+        t -= b1 << 14
+        b2 = t >> 7
+        if b2 > 223:
+            b2 = 223
+        b3 = t - (b2 << 7)
+        for b in (b0, b1, b2, b3):
+            self._data.append((b + 32) & 0xFF)
         return self
 
     def write_gint5(self, value: int) -> 'PacketBuilder':
