@@ -10,6 +10,8 @@ and diffs against the C++ oracle; this establishes the engine + core.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import math
 import random as _random
 
@@ -472,6 +474,9 @@ class Interpreter:
             return toks[idx] if 0 <= idx < len(toks) else ""
         if code == "#R":  # random pick among args
             return to_str(self.eval(_random.choice(a))) if a else ""
+        if code == "#E":  # base64-encoded SHA256 hash
+            s = to_str(self.eval(a[0])) if a else ""
+            return _base64_sha256(s)
         # character / context codes (#a account, #n nick, #c chat, #1-8, #C, ...)
         args = [self.eval(x) for x in a]
         return to_str(self.ctx.host.message_code(code, args, self.ctx))
@@ -928,6 +933,86 @@ def _sin(x):
     return math.sin(x)
 
 
+
+def _base64encode_impl(s):
+    """Encode a string to base64 with standard padding."""
+    return base64.b64encode(s.encode('utf-8')).decode('ascii')
+
+
+def _base64decode_impl(s):
+    """Decode a base64 string.
+    
+    On invalid input, return empty string (strict decode with error handling).
+    This is a deliberate choice: GServer-v2's behavior is not fully specified
+    for malformed input, so we use the safest fallback.
+    """
+    if not s:
+        return ""
+    try:
+        return base64.b64decode(s, validate=True).decode('utf-8', errors='replace')
+    except Exception:
+        return ""
+
+
+def _base64_sha256(s):
+    """Hash a string with SHA256 and return base64-encoded digest.
+    
+    Used by #E message code and passwordmatches().
+    """
+    h = hashlib.sha256(s.encode('utf-8')).digest()
+    return base64.b64encode(h).decode('ascii')
+
+
+def _getflagkeys(interp, a):
+    """Iterate flag store keys matching a prefix; return numeric array.
+    
+    The prefix may start with a storage qualifier (this./thiso./client./clientr./server./serverr.).
+    Unqualified defaults to the player (client) flag store.
+    For each matching key, parse the remainder as a number (non-numeric -> 0).
+    
+    Returns empty array if the store is not accessible.
+    """
+    prefix = to_str(a[0]) if a else ""
+    
+    # Parse the storage qualifier from the prefix
+    scope = None
+    remainder_prefix = prefix
+    
+    # Try to match a scope qualifier (check longest first to handle "clientr." before "client.")
+    for qual in ("thiso.", "this.", "clientr.", "client.", "serverr.", "server."):
+        if prefix.startswith(qual):
+            # Extract the namespace part and map it using NAMESPACES
+            namespace = qual[:-1]  # Remove the trailing dot
+            scope = NAMESPACES.get(namespace, namespace)
+            remainder_prefix = prefix[len(qual):]
+            break
+    
+    # If no qualifier found, default to player flags (None scope in var store)
+    
+    # Get the appropriate scope dict from the context
+    ctx = interp.ctx
+    if scope is None:
+        # Player flags (bare names)
+        store_dict = ctx.vars.player_flags
+    else:
+        # Scoped flags
+        store_dict = ctx.vars.scopes.get(scope, {})
+    
+    # Iterate keys matching the prefix and build the numeric array
+    result = []
+    for key in sorted(store_dict.keys()):  # Sort for deterministic ordering
+        if key.startswith(remainder_prefix):
+            # Parse the remainder as a number
+            remainder = key[len(remainder_prefix):]
+            try:
+                val = float(remainder)
+            except ValueError:
+                val = 0.0
+            result.append(val)
+    
+    return result
+
+
 _PURE = {
     # math
     "random": _f_random,
@@ -968,6 +1053,14 @@ _PURE = {
     # arrays
     "arraylen": lambda self, a: float(len(a[0])) if a and isinstance(a[0], (list, tuple)) else 0.0,
     "aindexof": lambda self, a: _aindexof(a),
+    # crypto/password
+    "base64encode": lambda self, a: _base64encode_impl(to_str(a[0]) if a else ""),
+    "base64decode": lambda self, a: _base64decode_impl(to_str(a[0]) if a else ""),
+    "passwordmatches": lambda self, a: (
+        len(a) > 1 and isinstance(a[0], str) and isinstance(a[1], str)
+        and a[0] == _base64_sha256(to_str(a[1]))
+    ),
+    "getflagkeys": lambda self, a: _getflagkeys(self, a),
 }
 
 

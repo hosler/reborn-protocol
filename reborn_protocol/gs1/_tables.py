@@ -230,6 +230,7 @@ FUNCTIONS = {
     'getdir': '(P)',
     'getflagkeys': '(S)',
     'getnearestplayer': '(P)',
+    'passwordmatches': '(SS)',
     'getnearestplayers': '(P)',
     'getnpc': '(S)',
     'getplayer': '(S)',
@@ -283,6 +284,7 @@ FUNCTIONS = {
 
 # message code literal (e.g. '#s') -> arg mode-string, or '' if none
 MESSAGECODES = {
+    '#E': '(S)',
     '#I': '(VP)',
     '#Q': '(SS)',
     '#R': '(L)',

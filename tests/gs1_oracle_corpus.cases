@@ -241,3 +241,29 @@ if (created) {
 (7 + 3) / 4
 =====STR str-msgcodes
 result #v(6*7) end
+=====CASE base64encode
+if (created) {
+  setstring this.hello, hello;
+  setstring this.encoded, #E(base64encode(#s(this.hello)));
+}
+=====CASE base64decode
+if (created) {
+  setstring this.b64, SGVsbG8=;
+  setstring this.decoded, #E(base64decode(#s(this.b64)));
+}
+=====CASE message-code-E-hash
+if (created) {
+  setstring this.hunter2_hash, 9S+9MrKzuG/4jvbEkGKChfSCrxXdyylUH5S89Saj9sc=;
+  setstring this.computed_hash, #E(#E(hunter2));
+  this.match = strequals(#s(this.hunter2_hash), #s(this.computed_hash));
+}
+=====CASE passwordmatches-success
+if (created) {
+  setstring this.plain, hunter2;
+  this.result = passwordmatches(#E(hunter2), #s(this.plain));
+}
+=====CASE passwordmatches-fail
+if (created) {
+  setstring this.wrong, wrongpass;
+  this.result = passwordmatches(#E(hunter2), #s(this.wrong));
+}
