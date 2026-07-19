@@ -278,6 +278,62 @@ if (created) {
   setstring this.grp,"#s(this.src)";
   setstring this.nogrp,#s(this.src);
 }
+=====CASE csv-quoted-roundtrip
+if (created) {
+  setstring this.a,alpha,omega;
+  insertstring this.a,1,"mid,dle";
+  setstring this.inserted,#I(this.a,1);
+  replacestring this.a,2,"tail,end";
+  setstring this.replaced,#I(this.a,2);
+  removestring this.a,"mid,dle";
+  setstring this.after,#s(this.a);
+}
+=====CASE csv-boundaries
+if (created) {
+  setstring this.ins,a,b; insertstring this.ins,99,z; setstring this.insout,#s(this.ins);
+  setstring this.miss,a,b; removestring this.miss,z; setstring this.missout,#s(this.miss);
+  setstring this.del,a,b; deletestring this.del,99; setstring this.delout,#s(this.del);
+  this.num = 42; addstring this.num,x; setstring this.numout,#s(this.num);
+  setstring this.plain,hello; setstring this.pi0,#I(this.plain,0); setstring this.pin,#I(this.plain,-1);
+}
+=====CASE save-slot-clamp
+if (created) {
+  this.save[0] = 300; this.save[1] = -5; this.save[2] = 12.7;
+  this.s0 = this.save[0]; this.s1 = this.save[1]; this.s2 = this.save[2];
+}
+=====CASE extract-edges
+if (created) {
+  setstring this.oob,#e(99,2,abcdef); setstring this.zero,#e(2,0,abcdef);
+  setstring this.negstart,#e(-2,3,abcdef); setstring this.neglen,#e(2,-1,abcdef);
+}
+=====CASE sleep-created-suspends
+if (created) { this.before = 1; sleep 1; this.after = 1; }
+=====CASE sleep-timeout-resume
+=====EVENTS created,timeout
+if (created) { sleep 1; this.after = 1; }
+if (timeout) { this.timeoutseen = 1; }
+=====CASE sleep-timeout-zero
+=====EVENTS created,timeout
+if (created) { sleep 1; this.after = 1; }
+if (timeout) { timeout = 0; this.cancel = 1; }
+=====CASE sleep-timeout-fraction
+=====EVENTS created,timeout
+if (created) { sleep 1; this.after = 1; }
+if (timeout) { timeout = 0.5; this.cancel = 1; }
+=====CASE tokenscount-lifetime
+=====EVENTS created,timeout
+if (created) { tokenize a b c; this.createdcount = tokenscount; }
+if (timeout) { this.latercount = tokenscount; setstring this.later0,#t(0); }
+=====CASE csv-string-number-coercion
+if (created) {
+  setstring this.list,hello,wo rld; this.x = this.list;
+  this.eqzero = 0; if (this.list == 0) this.eqzero = 1;
+}
+=====CASE csv-number-format
+if (created) {
+  setstring this.list,base; addstring this.list,3.50;
+  setstring this.item,#I(this.list,1); setstring this.v,#v(this.list);
+}
 =====CASE addstring-quoted
 if (created) {
   addstring this.list,"a,b";

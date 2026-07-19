@@ -47,6 +47,10 @@ KNOWN_UPSTREAM_BUGS = {
     # over bug-for-bug reference fidelity -- we always compute the real
     # angle, matching the docs table instead of this guard typo.
     "getdir-vertical": "upstream skips the angle calc for pure-vertical deltas (typo'd DoubleIsZero guard)",
+    # The documented NPC save slots are ten integer values clamped to 0..220,
+    # but the server oracle exposes `this.save` as a scalar zero and ignores
+    # indexed writes. Keep the documented behavior in the port.
+    "save-slot-clamp": "upstream oracle does not expose documented indexed NPC save slots",
 }
 
 TOLERANCE = 1e-6
@@ -109,7 +113,7 @@ class OracleHost(MemoryHost):
 
     def get_builtin(self, name, indices, ctx):
         if name == "tokenscount":
-            return float(len(ctx.tokenize_tokens))
+            return float(ctx.tokens_count)
         return super().get_builtin(name, indices, ctx)
 
 
@@ -118,8 +122,14 @@ def run_ours(case: Case) -> Context:
     program = parse(case.body)
     from reborn_protocol.gs1.interp import Interpreter
 
+    sleeping = None
     for event in case.events:
-        Interpreter(ctx).run_event(program, event)
+        if event == "timeout" and sleeping is not None and not sleeping.done:
+            sleeping.resume()
+        else:
+            execution = Interpreter(ctx).run_event_resumable(program, event)
+            if not execution.done:
+                sleeping = execution
     return ctx
 
 

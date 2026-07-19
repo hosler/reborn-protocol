@@ -218,6 +218,7 @@ class Context:
         self.functions = functions or {}  # name -> FuncDef (user functions)
         self.active_event = None      # the firing event name (its flag reads 1)
         self.tokenize_tokens = []     # set by `tokenize`, read by #t(i)
+        self.tokens_count = 0         # temporary per-event `tokenscount`
         self.steps = 0                # statement budget guard (infinite loops)
         self.max_steps = 200_000
         # While a setcharprop/setplayerprop VALUE argument is being evaluated

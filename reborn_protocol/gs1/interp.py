@@ -126,6 +126,8 @@ class Interpreter:
         for other events see their flag as false and skip themselves.
         """
         self.ctx.active_event = event
+        self.ctx.tokens_count = 0
+        self.ctx.vars.unset(None, "tokenscount")
         for stmt in program.body:
             if isinstance(stmt, ast.FuncDef):
                 self.ctx.functions[stmt.name] = stmt
@@ -266,6 +268,8 @@ class Interpreter:
         """Coroutine entry: run an event as a generator that yields sleep-seconds
         (coro mode). The scheduler drives this; sync callers use run_event."""
         self.ctx.active_event = event
+        self.ctx.tokens_count = 0
+        self.ctx.vars.unset(None, "tokenscount")
         for stmt in program.body:
             if isinstance(stmt, ast.FuncDef):
                 self.ctx.functions[stmt.name] = stmt
@@ -301,6 +305,9 @@ class Interpreter:
             # OP_ASSIGN, so `timeout += 1` does NOT clear) erases any
             # resumable sleep pending on this ctx. See Context.sleep_cancelled.
             self.ctx.sleep_cancelled = True
+        if node.op == "=" and not isinstance(value, (list, bool)):
+            # Plain assignment is numeric; text requires setstring.
+            value = to_num(value)
         self.set_ref(node.target, value)
 
     def _is_bare_timeout(self, ref):
@@ -322,6 +329,7 @@ class Interpreter:
         if name == "tokenize":
             s = to_str(self.eval(node.args[0])) if node.args else ""
             self.ctx.tokenize_tokens = _tokenize(s)
+            self.ctx.tokens_count = len(self.ctx.tokenize_tokens)
             self.ctx.vars.set("", "tokenscount",
                               float(len(self.ctx.tokenize_tokens)))
             return
@@ -329,6 +337,7 @@ class Interpreter:
             delimiters = to_str(self.eval(node.args[0])) if node.args else ""
             text = to_str(self.eval(node.args[1])) if len(node.args) > 1 else ""
             self.ctx.tokenize_tokens = _tokenize(text, delimiters)
+            self.ctx.tokens_count = len(self.ctx.tokenize_tokens)
             self.ctx.vars.set("", "tokenscount",
                               float(len(self.ctx.tokenize_tokens)))
             return
@@ -504,15 +513,19 @@ class Interpreter:
                 v = self.get_ref(a[0])
                 return "" if v is UNSET_VAL else to_str(v)
             return to_str(self.eval(a[0]))
-        if code in ("#v", "#U"):
+        if code == "#v":
+            return to_str(to_num(self.eval(a[0]))) if a else "0"
+        if code == "#U":
             return to_str(self.eval(a[0])) if a else ""
         if code == "#T":  # trim
             return to_str(self.eval(a[0])).strip() if a else ""
         if code == "#e":  # substr(start, len, str); negative len = to end
             if len(a) >= 3:
-                start = max(0, int(math.floor(to_num(self.eval(a[0])))))
+                start = int(math.floor(to_num(self.eval(a[0]))))
                 length = int(math.floor(to_num(self.eval(a[1]))))
                 s = to_str(self.eval(a[2]))
+                if start < 0:
+                    return ""
                 return s[start:] if length < 0 else s[start:start + length]
             return ""
         if code == "#I":  # csv item by index
@@ -761,6 +774,12 @@ class Interpreter:
         scope, key, indices, names = self._resolve(ref)
         index = indices[0] if indices else None
         if scope is not None:
+            if scope == "this" and key == "save" and index is not None:
+                slots = self.ctx.vars.scopes["this"].setdefault("save", [0.0] * 10)
+                i = int(index)
+                if 0 <= i < 10:
+                    slots[i] = float(min(220, max(0, int(to_num(value)))))
+                return
             self.ctx.vars.set(scope, key, value, index)
             return
         # bare assignment to a reserved constant name is illegal upstream
