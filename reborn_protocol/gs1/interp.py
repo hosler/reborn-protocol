@@ -17,23 +17,19 @@ import random as _random
 
 from . import ast
 from .parser import parse
+from .csv import gs1_csv_join, gs1_csv_split
 from .runtime import (Context, Host, MemoryHost, VarStore, UNSET, NAMESPACES,
                       RESERVED_CONSTANTS,
                       BreakSignal, ContinueSignal, ReturnSignal)
 from .values import (to_num, to_str, fmt_num,
                      gs1_num, gs1_truthy, is_double_zero)
 
-# `tokenize` splits on whitespace only in the reference (GS1Commands.cpp:3137).
-# We additionally split on commas — a deliberate divergence driven by Bomber
-# Arena (bomber.eevul.net:14916), whose room-roster strings ("Join
-# <timer>,host,member,..") and #P<n> gattrib slot lists are comma-separated;
-# without it those scripts can't tokenize their own state. Gated behind this
-# flag (rather than silently reverting) so the choice is visible and a future
-# non-Bomber corpus run can flip it off to check reference-exactness.
-TOKENIZE_SPLITS_ON_COMMA = True
-
 # commands the interpreter handles itself (manipulate the var store)
-_VAR_COMMANDS = {"set", "unset", "setstring", "addstring", "setarray"}
+_VAR_COMMANDS = {
+    "set", "unset", "setstring", "setarray",
+    "addstring", "deletestring", "insertstring", "removestring",
+    "replacestring",
+}
 # commands whose first argument is a message code used as an assignment target
 # (passed to the host as its raw code string, not its expanded value)
 _MSGCODE_TARGET_COMMANDS = {"setcharprop", "setplayerprop"}
@@ -58,6 +54,37 @@ _MAX_CALL_DEPTH = 100
 # PER LOOP (each while/for statement gets its own budget) and is separate
 # from/in addition to ctx.max_steps, which remains a whole-script backstop.
 _MAX_LOOP_ITERATIONS = 10000
+
+
+def _tokenize(text, delimiters=""):
+    """Split on standard/custom delimiters while preserving quoted chunks."""
+    text = text.strip()
+    if not text:
+        return []
+
+    tokens = []
+    start = 0
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if char == '"':
+            start = i + 1
+            end = text.find('"', start)
+            if end == -1:
+                tokens.append(text[start:])
+                return tokens
+            tokens.append(text[start:end])
+            start = end + 1
+            i = end
+        elif char in " \t," or char in delimiters:
+            if start != i:
+                tokens.append(text[start:i])
+            start = i + 1
+        i += 1
+
+    if start != len(text):
+        tokens.append(text[start:])
+    return tokens
 
 
 class Interpreter:
@@ -294,17 +321,16 @@ class Interpreter:
             return
         if name == "tokenize":
             s = to_str(self.eval(node.args[0])) if node.args else ""
-            # See TOKENIZE_SPLITS_ON_COMMA above: the bomber's room strings
-            # ("Join <timer>,host,member,..") and slot lists are
-            # comma-separated, and standby NPC 190 reads members via #t(i).
-            if TOKENIZE_SPLITS_ON_COMMA:
-                s = s.replace(",", " ")
-            self.ctx.tokenize_tokens = s.split()
+            self.ctx.tokenize_tokens = _tokenize(s)
+            self.ctx.vars.set("", "tokenscount",
+                              float(len(self.ctx.tokenize_tokens)))
             return
         if name == "tokenize2":
-            s = to_str(self.eval(node.args[0])) if node.args else ""
-            sep = to_str(self.eval(node.args[1])) if len(node.args) > 1 else " "
-            self.ctx.tokenize_tokens = s.split(sep) if sep else list(s)
+            delimiters = to_str(self.eval(node.args[0])) if node.args else ""
+            text = to_str(self.eval(node.args[1])) if len(node.args) > 1 else ""
+            self.ctx.tokenize_tokens = _tokenize(text, delimiters)
+            self.ctx.vars.set("", "tokenscount",
+                              float(len(self.ctx.tokenize_tokens)))
             return
         if name in _MSGCODE_TARGET_COMMANDS and node.args:
             # setcharprop/setplayerprop take a message code as an assignment
@@ -361,7 +387,38 @@ class Interpreter:
             else:
                 self._store_set(args[0], val)
         elif name == "addstring":
-            self._array_append(args[0], to_str(self.eval(args[1])) if len(args) > 1 else "")
+            items = self._string_list(args[0])
+            items.append(to_str(self.eval(args[1])) if len(args) > 1 else "")
+            self._store_set(args[0], gs1_csv_join(items))
+        elif name == "deletestring":
+            items = self._string_list(args[0])
+            index = max(0, int(math.floor(to_num(self.eval(args[1])))))
+            if index < len(items):
+                del items[index]
+                self._store_set(args[0], gs1_csv_join(items))
+        elif name == "insertstring":
+            items = self._string_list(args[0])
+            index = max(0, int(math.floor(to_num(self.eval(args[1])))))
+            index = min(index, len(items))
+            items.insert(index, to_str(self.eval(args[2])))
+            self._store_set(args[0], gs1_csv_join(items))
+        elif name == "removestring":
+            current = self._store_get(args[0])
+            if not isinstance(current, str) or current == "":
+                return
+            text = to_str(self.eval(args[1]))
+            items = [item for item in gs1_csv_split(current)
+                     if item != text]
+            self._store_set(args[0], gs1_csv_join(items))
+        elif name == "replacestring":
+            items = self._string_list(args[0])
+            index = max(0, int(math.floor(to_num(self.eval(args[1])))))
+            text = to_str(self.eval(args[2]))
+            if index >= len(items):
+                items.append(text)
+            else:
+                items[index] = text
+            self._store_set(args[0], gs1_csv_join(items))
         elif name == "setarray":
             # fn_setarray (GS1Commands.cpp, commit f6803352) resizes an
             # EXISTING array in place, preserving contents and zero-filling
@@ -462,7 +519,7 @@ class Interpreter:
             if len(a) >= 2:
                 csv = to_str(self.eval(a[0]))
                 idx = int(math.floor(to_num(self.eval(a[1]))))
-                items = csv.split(",") if csv else []
+                items = gs1_csv_split(csv)
                 return items[idx] if 0 <= idx < len(items) else ""
             return ""
         if code == "#K":  # char from ascii code
@@ -729,12 +786,9 @@ class Interpreter:
         scope, key, indices, names = self._resolve(ref)
         self.ctx.vars.set(scope, key, value, indices[0] if indices else None)
 
-    def _array_append(self, ref, value):
+    def _string_list(self, ref):
         cur = self._store_get(ref)
-        if not isinstance(cur, list):
-            cur = [] if cur is UNSET_VAL else [cur]
-        cur.append(value)
-        self._store_set(ref, cur)
+        return gs1_csv_split(cur) if isinstance(cur, str) else []
 
 
 class ResumableExecution:
@@ -846,6 +900,30 @@ _VECY = (-1.0, 0.0, 1.0, 0.0)
 def _ascii(a):
     s = to_str(a[0]) if a else ""
     return float(ord(s[0]) & 0xFF) if s else 0.0
+
+
+def _keycode(a):
+    key = to_str(a[0]) if a else ""
+    if not key:
+        return 0.0
+    char = key[0]
+    if "a" <= char <= "z":
+        char = char.upper()
+    punctuation = {
+        ";": 0xBA, ":": 0xBA, "=": 0xBB, "+": 0xBB,
+        ",": 0xBC, "<": 0xBC, "-": 0xBD, "_": 0xBD,
+        ".": 0xBE, ">": 0xBE, "/": 0xBF, "?": 0xBF,
+        "`": 0xC0, "~": 0xC0, "[": 0xDB, "{": 0xDB,
+        "\\": 0xDC, "|": 0xDC, "]": 0xDD, "}": 0xDD,
+        "'": 0xDE, '"': 0xDE,
+    }
+    if char == "\t":
+        return float(0x09)
+    if char == " ":
+        return float(0x20)
+    if "0" <= char <= "9" or "A" <= char <= "Z":
+        return float(ord(char))
+    return float(punctuation.get(char, 0))
 
 
 def _getangle(a):
@@ -1033,7 +1111,7 @@ _PURE = {
     "vecy": lambda self, a: _VECY[int(math.floor(to_num(a[0]) if a else 0)) % 4],
     # strings
     "ascii": lambda self, a: _ascii(a),
-    "keycode": lambda self, a: _ascii(a),
+    "keycode": lambda self, a: _keycode(a),
     "strlen": lambda self, a: float(len(to_str(a[0]))) if a else 0.0,
     "strtofloat": lambda self, a: to_num(a[0]) if a else 0.0,
     # GS1 string matching is CASE-INSENSITIVE (GServer-v2 uses equalsi/findi),

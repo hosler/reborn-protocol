@@ -4,12 +4,102 @@ Each case cites the GServer-v2 commit that fixed the reference C++
 implementation (server/src/scripting/gs1/); see the corresponding fix in
 reborn_protocol/gs1/interp.py / runtime.py for the exact upstream text.
 """
-from reborn_protocol.gs1.interp import run, Interpreter
+import pytest
+
+from reborn_protocol.gs1.interp import run, Interpreter, _keycode
 from reborn_protocol.gs1 import parse
+from reborn_protocol.gs1.lexer import IDENTIFIER, MESSAGECODE, tokenize as lex
+from reborn_protocol.gs1.runtime import MemoryHost
 
 
 def probe(ctx, expr):
     return Interpreter(ctx).eval(parse(expr + ";").body[0].expr)
+
+
+def this_value(ctx, name):
+    return ctx.vars.get("this", name)
+
+
+# -- quoted tokenizer and custom delimiter behavior (a167a592) ------------
+def test_tokenize_preserves_quoted_text_and_splits_standard_delimiters():
+    ctx = run('setstring test,This, is "A, test" string; tokenize #s(test); '
+              'this.count=tokenscount; setstring this.t0,#t(0); '
+              'setstring this.t1,#t(1); setstring this.t2,#t(2); '
+              'setstring this.t3,#t(3);')
+    assert this_value(ctx, "count") == 4.0
+    assert [this_value(ctx, f"t{i}") for i in range(4)] == [
+        "This", "is", "A, test", "string",
+    ]
+
+
+def test_tokenize2_uses_delimiters_then_text_and_preserves_quotes():
+    ctx = run('setstring test,This, is "A, test" string; '
+              'tokenize2 i,#s(test); this.count=tokenscount; '
+              'setstring this.t0,#t(0); setstring this.t1,#t(1); '
+              'setstring this.t2,#t(2); setstring this.t3,#t(3); '
+              'setstring this.t4,#t(4); setstring this.t5,#t(5);')
+    assert this_value(ctx, "count") == 6.0
+    assert [this_value(ctx, f"t{i}") for i in range(6)] == [
+        "Th", "s", "s", "A, test", "str", "ng",
+    ]
+
+
+def test_tokenize_unmatched_quote_consumes_remainder_and_suppresses_gaps():
+    ctx = run('tokenize one,,, "two, three; this.count=tokenscount; '
+              'setstring this.t0,#t(0); setstring this.t1,#t(1);')
+    assert this_value(ctx, "count") == 2.0
+    assert this_value(ctx, "t0") == "one"
+    assert this_value(ctx, "t1") == "two, three"
+
+
+# -- keycode returns Windows virtual-key codes (6785583d) -----------------
+@pytest.mark.parametrize(("key", "expected"), [
+    ("a", 0x41), ("Ztail", 0x5A), ("5", 0x35), (" ", 0x20),
+    (";", 0xBA), (":", 0xBA), ("+", 0xBB), ("<", 0xBC),
+    ("_", 0xBD), (">", 0xBE), ("?", 0xBF), ("~", 0xC0),
+    ("{", 0xDB), ("\\", 0xDC), ("}", 0xDD), ("'", 0xDE),
+    ("@", 0), ("", 0),
+])
+def test_keycode_virtual_key_mapping(key, expected):
+    assert _keycode([key]) == expected
+
+
+def test_keycode_builtin_uses_only_first_character():
+    assert probe(run(""), "keycode(atail)") == 0x41
+
+
+# -- doubled-hash escape (dd213040) ---------------------------------------
+def test_hash_escape_in_expression_condition_context():
+    tokens = lex("if (## == ##) { this.ok=1; }")
+    hashes = [token for token in tokens if token.text == "#"]
+    assert [token.type for token in hashes] == [IDENTIFIER, IDENTIFIER]
+    assert this_value(run("if (## == ##) { this.ok=1; }"), "ok") == 1.0
+
+
+def test_hash_escape_in_raw_say2_string():
+    host = MemoryHost()
+    run("say2 alpha##beta;", host=host)
+    assert host.log == [("say2", ["alpha#beta"])]
+
+
+def test_hash_escape_in_setstring_value():
+    ctx = run("setstring this.value,alpha##beta;")
+    assert this_value(ctx, "value") == "alpha#beta"
+
+
+def test_hash_escape_adjacent_to_real_message_code():
+    class MessageHost(MemoryHost):
+        def message_code(self, code, args, ctx):
+            return "expanded" if code == "#c" else ""
+
+    tokens = lex("setstring this.value,###c;")
+    hash_tokens = [token for token in tokens if token.text.startswith("#")]
+    assert [(token.type, token.text) for token in hash_tokens] == [
+        ("STRING", "#"),
+        (MESSAGECODE, "#c"),
+    ]
+    ctx = run("setstring this.value,###c;", host=MessageHost())
+    assert this_value(ctx, "value") == "#expanded"
 
 
 # -- getdir(dx, dy) is angle-based, not a cardinal snap (GServer-v2 9e759e9d) -

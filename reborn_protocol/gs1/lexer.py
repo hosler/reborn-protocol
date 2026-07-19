@@ -308,6 +308,13 @@ class Lexer:
             self.push_command(args)
         return Token(MESSAGECODE, code, m.start())
 
+    def _match_hash_escape(self, token_type):
+        if not self.text.startswith("##", self.pos):
+            return None
+        start = self.pos
+        self.pos += 2
+        return Token(token_type, "#", start)
+
     def _scan_word(self):
         m = _IDENT.match(self.text, self.pos)
         return m.group(0) if m else None
@@ -372,6 +379,9 @@ class Lexer:
             return None
         c = self.text[self.pos]
         if c == "#":
+            escaped = self._match_hash_escape(IDENTIFIER)
+            if escaped:
+                return escaped
             mc = self._match_messagecode()
             if mc:
                 return mc
@@ -549,6 +559,9 @@ class Lexer:
             self.push_array_access()
             return Token("TOKEN_BRACKET_LEFT", "[", self.pos - 1)
         if c == "#":
+            escaped = self._match_hash_escape(IDENTIFIER)
+            if escaped:
+                return escaped
             mc = self._match_messagecode()
             if mc:
                 return mc
@@ -598,6 +611,9 @@ class Lexer:
             self.pos += 1
             return Token("TOKEN_COMMA", ",", self.pos - 1)
         if c == "#":
+            escaped = self._match_hash_escape(IDENTIFIER)
+            if escaped:
+                return escaped
             mc = self._match_messagecode()
             if mc:
                 return mc
@@ -642,15 +658,6 @@ class Lexer:
     def _string_mode(self, raw):
         if self.pos >= self.n:
             return Token(EOF, "", self.pos)
-        # In GScript double quotes GROUP a value (e.g. "#a", "#I(list,0)"); the
-        # quote chars are delimiters, not part of the string. Skip them so a
-        # quoted account isn't stored as "hosler1" (raw say-style mode keeps
-        # them literal). Content/message-codes inside are scanned normally.
-        if not raw:
-            while self.pos < self.n and self.text[self.pos] == '"':
-                self.pos += 1
-            if self.pos >= self.n:
-                return Token(EOF, "", self.pos)
         c = self.text[self.pos]
         if c == "}" and self._can_cmd_pop():
             self.emit_before(END)
@@ -669,10 +676,9 @@ class Lexer:
             self.pop_next_mode()
             self.pos += 1
             return Token("TOKEN_COMMA", ",", self.pos - 1)
+        if self.text.startswith("##", self.pos):
+            return self._match_hash_escape(STRING)
         if not raw:
-            if self.text.startswith("##", self.pos):
-                self.pos += 2
-                return Token(STRING, "##", self.pos - 2)
             if c == "#":
                 mc = self._match_messagecode()
                 if mc:
@@ -688,9 +694,7 @@ class Lexer:
         func_pop = self._can_func_pop()
         while self.pos < n:
             ch = t[self.pos]
-            if not raw and ch == "#":
-                break
-            if not raw and ch == '"':   # quote delimiter — stop, _string_mode skips it
+            if (not raw and ch == "#") or (raw and t.startswith("##", self.pos)):
                 break
             if ch == "}" and cmd_pop:
                 break
@@ -732,8 +736,7 @@ class Lexer:
             self.pos += 1
             return Token("TOKEN_COMMA", ",", self.pos - 1)
         if self.text.startswith("##", self.pos):
-            self.pos += 2
-            return Token(STRING, "##", self.pos - 2)
+            return self._match_hash_escape(STRING)
         if c == "#":
             mc = self._match_messagecode()
             if mc:

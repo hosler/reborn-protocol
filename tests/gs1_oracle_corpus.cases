@@ -267,3 +267,55 @@ if (created) {
   setstring this.wrong, wrongpass;
   this.result = passwordmatches(#E(hunter2), #s(this.wrong));
 }
+=====CASE quoted-setstring
+if (created) {
+  setstring this.s,"hello";
+  setstring this.bare,hello;
+}
+=====CASE quoted-mc-group
+if (created) {
+  setstring this.src,world;
+  setstring this.grp,"#s(this.src)";
+  setstring this.nogrp,#s(this.src);
+}
+=====CASE addstring-quoted
+if (created) {
+  addstring this.list,"a,b";
+  setstring this.i0,#I(this.list,0);
+}
+=====CASE addstring-plain
+if (created) {
+  addstring this.l2,hello;
+  addstring this.l2,wo rld;
+  setstring this.j0,#I(this.l2,0);
+  setstring this.j1,#I(this.l2,1);
+}
+=====CASE tokenize-vector
+if (created) {
+  tokenize This, is "A, test" string;
+  this.cnt = tokenscount;
+  setstring this.t0,#t(0);
+  setstring this.t2,#t(2);
+  setstring this.t3,#t(3);
+}
+=====CASE tokenize2-vector
+if (created) {
+  tokenize2 i,This, is "A, test" string;
+  this.cnt = tokenscount;
+  setstring this.t0,#t(0);
+  setstring this.t3,#t(3);
+  setstring this.t4,#t(4);
+}
+=====CASE hash-escape
+if (created) {
+  setstring this.h,a##b;
+  setstring this.raw2,x###cy;
+}
+=====CASE keycode-vk
+if (created) {
+  this.ka = keycode(a);
+  this.kz = keycode(Z);
+  this.k7 = keycode(7);
+  setstring this.semi,;;
+  this.ksemi = keycode(#s(this.semi));
+}
