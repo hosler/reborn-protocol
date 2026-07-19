@@ -102,6 +102,29 @@ def test_hash_escape_adjacent_to_real_message_code():
     assert this_value(ctx, "value") == "#expanded"
 
 
+def test_weapon_message_codes_route_index_and_bare_selection_to_host():
+    class WeaponHost(MemoryHost):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        def weapon_message_code(self, code, index, ctx):
+            self.calls.append((code, index))
+            return f"{code}:{index}"
+
+    host = WeaponHost()
+    ctx = run("setstring this.a,#w; setstring this.b,#W(2.9);", host=host)
+    assert this_value(ctx, "a") == "#w:None"
+    assert this_value(ctx, "b") == "#W:2"
+    assert host.calls == [("#w", None), ("#W", 2)]
+
+
+def test_memory_host_weapon_codes_keep_empty_default():
+    ctx = run("setstring this.a,#w; setstring this.b,#W(99);")
+    assert this_value(ctx, "a") == ""
+    assert this_value(ctx, "b") == ""
+
+
 # -- getdir(dx, dy) is angle-based, not a cardinal snap (GServer-v2 9e759e9d) -
 def test_getdir_cardinals():
     ctx = run("this.left=getdir(-1,0); this.right=getdir(1,0);")

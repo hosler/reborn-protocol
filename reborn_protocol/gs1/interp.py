@@ -547,6 +547,11 @@ class Interpreter:
         if code == "#E":  # base64-encoded SHA256 hash
             s = to_str(self.eval(a[0])) if a else ""
             return _base64_sha256(s)
+        if code in ("#W", "#w"):
+            # Indexed forms name a weapon slot; bare forms name the currently
+            # selected slot. Selection is client state, so keep it on Host.
+            index = int(math.floor(to_num(self.eval(a[0])))) if a else None
+            return to_str(self.ctx.host.weapon_message_code(code, index, self.ctx))
         # character / context codes (#a account, #n nick, #c chat, #1-8, #C, ...)
         args = [self.eval(x) for x in a]
         return to_str(self.ctx.host.message_code(code, args, self.ctx))

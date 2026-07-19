@@ -90,6 +90,10 @@ class Host:
         """Expand a message code (e.g. #a account name) to a string."""
         return ""
 
+    def weapon_message_code(self, code, index, ctx) -> str:
+        """Expand #W/#w; ``index`` is None for the selected weapon."""
+        return ""
+
 
 class MemoryHost(Host):
     """In-memory host for standalone execution and tests.
