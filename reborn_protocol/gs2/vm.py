@@ -206,14 +206,38 @@ class GS2VM:
                 if j.has_function(name):
                     return j.call(name, *args)
             return None
-        self._ops_used = 0
-        self._errors = 0
         try:
-            return self._execute(idx, list(args))
+            gen = self._start_execution(idx, list(args), coro_mode=False)
+            while True:
+                try:
+                    next(gen)
+                except StopIteration as done:
+                    return done.value
         except Exception as e:  # absolute backstop; _execute already guards
             self._log_once(("call", self.name, key, type(e).__name__),
                            "GS2 %s.%s aborted: %s", self.name, name, e)
             return None
+
+    def iter_call(self, name: str, *args: Any):
+        """Invoke a script function as a coroutine yielding sleep durations."""
+        key = name.lower()
+        idx = self.functions.get(key)
+        if idx is None:
+            for j in self.joined:
+                if j.has_function(name):
+                    return j.iter_call(name, *args)
+
+            def empty():
+                if False:
+                    yield None
+                return None
+            return empty()
+        return self._start_execution(idx, list(args), coro_mode=True)
+
+    def _start_execution(self, idx: int, args: List[Any], coro_mode: bool):
+        self._ops_used = 0
+        self._errors = 0
+        return self._execute(idx, args, coro_mode)
 
     def run_toplevel(self) -> None:
         """Execute the script from instruction 0: runs any statements outside
@@ -224,7 +248,9 @@ class GS2VM:
         self._ops_used = 0
         self._errors = 0
         try:
-            self._execute(0, [])
+            gen = self._start_execution(0, [], coro_mode=False)
+            for _ in gen:
+                pass
         except Exception as e:
             self._log_once(("toplevel", self.name, type(e).__name__),
                            "GS2 %s toplevel aborted: %s", self.name, e)
@@ -286,7 +312,7 @@ class GS2VM:
 
     # ------------------------------------------------------------ core loop
 
-    def _execute(self, start_idx: int, args: List[Any]) -> Any:
+    def _execute(self, start_idx: int, args: List[Any], coro_mode: bool):
         """Run one frame starting at instruction start_idx. args are the
         caller-supplied parameters bound by OP_FUNC_PARAMS_END."""
         frame = _Frame(start_idx, args)
@@ -318,7 +344,21 @@ class GS2VM:
                 continue
 
             try:
-                result = handler(frame, instr)
+                if opnum == Op.OP_SLEEP and coro_mode:
+                    secs = to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
+                    if secs > 0:
+                        yield float(secs)
+                        self._ops_used = 0
+                    result = None
+                elif opnum == Op.OP_CALL:
+                    target = frame.stack.pop() if frame.stack else None
+                    call_args = [self.deref(a, frame) for a in self._pop_args(frame)]
+                    value = yield from self._gcall_target(
+                        target, call_args, frame, coro_mode)
+                    frame.stack.append(value)
+                    result = None
+                else:
+                    result = handler(frame, instr)
             except _ReturnValue as rv:
                 return rv.value
             except Exception as e:
@@ -357,6 +397,11 @@ class GS2VM:
         g = self.globals
         if key in g:
             return g[key]
+        if key == "params":
+            # event-parameter array: the compiler emits a plain named var
+            # (TYPE_VAR 'params'), not OP_PARAMS, so resolve it here; an
+            # explicit script variable of the same name shadows it above
+            return list(frame.args)
         if self.host is not None:
             obj = self.host.get_object(key)
             if obj is not None:
@@ -1147,6 +1192,30 @@ class GS2VM:
         frame.stack.append(self._call_target(target, args, frame))
         return None
 
+    def _gcall_target(self, target: Any, args: List[Any], frame: "_Frame",
+                      coro_mode: bool):
+        if (isinstance(target, LValue) and target.obj is self.this
+                and self.has_function(target.key)):
+            return (yield from self._gcall_script(
+                target.key.lower(), args, coro_mode))
+        if isinstance(target, VarRef):
+            name = target.name.lower()
+            if self.has_function(name):
+                return (yield from self._gcall_script(name, args, coro_mode))
+        return self._call_target(target, args, frame)
+
+    def _gcall_script(self, name: str, args: List[Any], coro_mode: bool):
+        idx = self.functions.get(name)
+        if idx is not None:
+            return (yield from self._execute(idx, args, coro_mode))
+        for joined in self.joined:
+            if joined.has_function(name):
+                joined._ops_used = self._ops_used
+                value = yield from joined._gcall_script(name, args, coro_mode)
+                self._ops_used = joined._ops_used
+                return value
+        return None
+
     def _call_target(self, target: Any, args: List[Any], frame: "_Frame") -> Any:
         cls = type(self)
 
@@ -1181,7 +1250,12 @@ class GS2VM:
             # script's own functions (incl. joined classes)
             idx = self.functions.get(name)
             if idx is not None:
-                return self._execute(idx, args)
+                gen = self._start_execution(idx, args, coro_mode=False)
+                try:
+                    while True:
+                        next(gen)
+                except StopIteration as done:
+                    return done.value
             for j in self.joined:
                 if j.has_function(name):
                     return j.call(name, *args)
