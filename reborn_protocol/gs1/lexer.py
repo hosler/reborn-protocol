@@ -84,7 +84,7 @@ DIR_NAMES = {"up", "left", "down", "right"}
 _REAL = re.compile(r"0x[0-9a-fA-F]+|[0-9]+(?:\.[0-9]+)?|\.[0-9]+")
 _IDENT = re.compile(r"[a-zA-Z0-9_]+")
 # message code: '#' then a code char-class (longest forms first)
-_MC = re.compile(r"#(?:C[0-9]|P1[0-9]?|P2[0-9]?|P30?|P[456789]|[angcmWw1235678NDLFfpbESptKkGsvIeiTURQ])")
+_MC = re.compile(r"#(?:C[0-9]|P[0-9]+|P(?=\()|[angcmWw1235678NDLFfpbESptKkGsvIeiTURQ])")
 
 # arg-char -> lexer mode (mirrors popNextMode's switch)
 MODE_OF = {
@@ -300,7 +300,12 @@ class Lexer:
         code = m.group(0)
         self.pos = m.end()
         nxt = self.text[self.pos] if self.pos < self.n else ""
-        args = MESSAGECODES.get(code)  # computed codes: #s/#v/#e/#I/#T/#U/#i/#R/#Q
+        if code == "#P":
+            # Uppercase #P is the dynamic form of the static #P<n> player
+            # property codes. Lowercase #p remains the action-parameter code.
+            args = "(E)"
+        else:
+            args = MESSAGECODES.get(code)
         if args is None:
             # simple code: takes an optional (param) only if '(' follows
             args = "(P)" if nxt == "(" else ""
@@ -370,6 +375,16 @@ class Lexer:
     # =====================================================================
     # DEFAULT mode (top level: commands, keywords, control flow)
     # =====================================================================
+    def _has_pending_ternary(self):
+        """Return whether the current statement contains a ternary marker."""
+        boundaries = {END, "TOKEN_BRACE_LEFT", "TOKEN_BRACE_RIGHT"}
+        for token in reversed(self.out):
+            if token.type in boundaries:
+                return False
+            if token.type == "TOKEN_QUESTION":
+                return True
+        return False
+
     def _mode_DEFAULT(self):
         # ' in ' operator must be matched before whitespace is skipped
         if self.text.startswith(" in ", self.pos):
@@ -385,6 +400,11 @@ class Lexer:
             mc = self._match_messagecode()
             if mc:
                 return mc
+        if c == ":" and not self._has_pending_ternary():
+            # Outside a pending ternary, ':' joins a classic free-form flag
+            # operand (for example `if (!Spar:xyz)`).
+            self.pos += 1
+            return Token(IDENTIFIER, ":", self.pos - 1)
         if c == ";":
             self.pos += 1
             return Token(END, ";", self.pos - 1)
@@ -565,6 +585,9 @@ class Lexer:
             mc = self._match_messagecode()
             if mc:
                 return mc
+        if c == ":" and not self._has_pending_ternary():
+            self.pos += 1
+            return Token(IDENTIFIER, ":", self.pos - 1)
         if c.isalpha() or c == "_":
             return self._expr_word()
         if c.isdigit() or (c == "." and self.pos + 1 < self.n and self.text[self.pos + 1].isdigit()):
@@ -628,7 +651,14 @@ class Lexer:
             # part of the identifier, not multiplication (that's expr mode).
             self.pos += 1
             return Token(IDENTIFIER, "*", self.pos - 1)
-        if c in "|?:.":
+        if c in "!:":
+            # Classic flag names are strings rather than language identifiers.
+            # In a V argument (`set`/`unset` and other flag-target commands),
+            # punctuation is part of the compound flag name; adjacent #x(...)
+            # tokens remain dynamic PathPart atoms and are interpolated later.
+            self.pos += 1
+            return Token(IDENTIFIER, c, self.pos - 1)
+        if c in "|?.":
             self.pos += 1
             return Token(PUNCT[c], c, self.pos - 1)
         if c.isdigit() or (c == "." and self.pos + 1 < self.n and self.text[self.pos + 1].isdigit()):

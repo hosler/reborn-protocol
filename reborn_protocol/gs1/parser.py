@@ -19,7 +19,15 @@ ASSIGN_OPS = {"OP_ASSIGN", "OP_ASSIGN_ADD", "OP_ASSIGN_SUB", "OP_ASSIGN_MUL",
 EQUALITY_OPS = {"OP_EQUAL", "OP_ASSIGN", "OP_NOTEQ"}
 RELATIONAL_OPS = {"OP_LESS", "OP_GREAT", "OP_LESS_EQ", "OP_GREAT_EQ"}
 ADDITIVE_OPS = {"OP_ADD", "OP_SUB"}
-MULTIPLICATIVE_OPS = {"OP_MUL", "OP_DIV", "OP_MOD"}
+# NB: OP_MOD is NOT in here — in real GS1, % binds TIGHTER than * and /
+# (its own level below multiplicative, see parse_mod). Ground truth: Bomber
+# Arena's lobby smoke NPC computes its 5x5 texture-grid columns as
+# `400/16*this.i%5`, pairing it with `400/16*int(this.i/5)` for rows — which
+# only yields a grid if that parses as (400/16)*(this.i%5). With C-style
+# same-level parsing it's ((400/16)*i)%5 == 0 for every i, and all 24 tiles
+# collapsed onto one off-screen column (verified live 2026-07-22: the smoke
+# drew as a single 400px square with hard seams).
+MULTIPLICATIVE_OPS = {"OP_MUL", "OP_DIV"}
 UNARY_OPS = {"OP_ADD", "OP_SUB", "OP_LOGICALNOT"}
 SPECIAL_LITS = {"ITEM", "CARRY", "DIRECTION", "GENDER", "COLOR", "BADDY"}
 STMT_TERMINATORS = {"END", "EOF", "TOKEN_BRACE_RIGHT"}
@@ -301,10 +309,19 @@ class Parser:
         return node
 
     def parse_multiplicative(self):
-        node = self.parse_in()
+        node = self.parse_mod()
         while self.peek().type in MULTIPLICATIVE_OPS:
             op = self.next().text
-            node = ast.BinOp(op, node, self.parse_in())
+            node = ast.BinOp(op, node, self.parse_mod())
+        return node
+
+    def parse_mod(self):
+        # % sits between multiplicative and 'in': `a*b%c` == a*(b%c) in real
+        # GS1 (see the MULTIPLICATIVE_OPS comment at the top of the file).
+        node = self.parse_in()
+        while self.peek().type == "OP_MOD":
+            self.next()
+            node = ast.BinOp("%", node, self.parse_in())
         return node
 
     def parse_in(self):

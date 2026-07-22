@@ -346,6 +346,15 @@ class Interpreter:
             # *target* (#1 sword, #3 head, ...), so pass its raw code rather
             # than the expanded value (mirrors GS1Visitor's prop-ref handling).
             code = _raw_msgcode(node.args[0])
+            target_code = node.args[0]
+            if isinstance(target_code, ast.StrConcat):
+                codes = [part for part in target_code.parts
+                         if isinstance(part, ast.MessageCode)]
+                target_code = codes[0] if len(codes) == 1 else target_code
+            if (code == "#P" and isinstance(target_code, ast.MessageCode)
+                    and target_code.args):
+                prop = int(math.floor(to_num(self.eval(target_code.args[0]))))
+                code = f"#P{prop}"
             first = code if code is not None else self.eval(node.args[0])
             # While the VALUE args are evaluated, the command's own target is
             # the current source for bare context-sensitive message codes
@@ -502,6 +511,11 @@ class Interpreter:
     def _eval_messagecode(self, node):
         code = node.code
         a = node.args
+        if code == "#P":
+            if not a:
+                return ""
+            prop = int(math.floor(to_num(self.eval(a[0]))))
+            return to_str(self.ctx.host.message_code(f"#P{prop}", [], self.ctx))
         # computed / string-manipulation codes (faithful to GS1MessageCodes.cpp)
         if code == "#s":
             # string-of: an UNSET flag is the empty string, NOT "0" (an unset
@@ -731,13 +745,48 @@ class Interpreter:
 
     # -- variable resolution ----------------------------------------------
     def _part_name(self, part):
-        if part.atoms:
-            return "".join(
-                p.value if isinstance(p, ast.Str) else self._eval_messagecode(p)
-                for p in part.atoms)
-        return part.name
+        # The parser stores the concatenated text in part.name for STATIC
+        # parts (and "" for dynamic ones, which carry MessageCode atoms), so
+        # only dynamic parts need the per-access join/eval. Rebuilding static
+        # names from atoms on every variable access measured ~20% of script
+        # CPU on array-heavy scripts.
+        if part.name or not part.atoms:
+            return part.name
+        return "".join(
+            p.value if isinstance(p, ast.Str) else self._eval_messagecode(p)
+            for p in part.atoms)
 
     def _resolve(self, ref):
+        # Fast path: a ref whose every path part has a static name (no #v()/
+        # message-code atoms) always resolves to the same (scope, key, names)
+        # — memoize that on the AST node. This is the interpreter's hottest
+        # call site (every variable read/write); the per-call string joins
+        # measured ~30% of script CPU on array-heavy scripts. Index
+        # expressions stay dynamic and are evaluated per call. The memo is a
+        # deterministic function of the (immutable) node, so sharing parsed
+        # programs across scripts/levels stays safe.
+        cached = getattr(ref, "_rcache", None)
+        if cached is None:
+            # A part is static iff its name survived parsing (parser leaves
+            # name="" only for dynamic #v()-style segments).
+            if any(not p.name and p.atoms for p in ref.parts):
+                cached = False              # dynamic name -> slow path forever
+            else:
+                names = [p.name for p in ref.parts]
+                first = names[0]
+                if first in NAMESPACES and len(names) > 1:
+                    cached = (NAMESPACES[first], ".".join(names[1:]), names)
+                else:
+                    cached = (None, ".".join(names), names)
+            ref._rcache = cached
+        if cached is not False:
+            scope, key, names = cached
+            indices = []
+            for p in ref.parts:
+                if p.index:
+                    indices = [int(to_num(self.eval(e))) for e in p.index]
+                    break
+            return scope, key, indices, names
         names = [self._part_name(p) for p in ref.parts]
         # Evaluate ALL indices on the indexed part (2D access like tiles[x,y]).
         # The var store uses the first index; built-ins get the whole list.

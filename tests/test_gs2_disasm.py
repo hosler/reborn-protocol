@@ -122,3 +122,26 @@ def test_truncated_blob_raises_cleanly():
     blob += struct.pack(">II", 4, 21) + b"\x01\xf4\x00\x0c\x17\x33"  # only 6 of 21 bytes
     with pytest.raises(GS2ContainerError):
         parse_container(blob)
+
+
+def test_set_index_without_typed_marker_keeps_implicit_zero_operand():
+    # The C# client's bytecode loader attaches only 0xF0-0xF6 records as
+    # operands. An ordinary byte after OP_SET_INDEX is the next opcode, while
+    # the jump record retains its zero-initialized value.
+    instrs = decode(b"\x01\x20")
+    assert [(i.offset, i.opnum) for i in instrs] == [(0, 1), (1, 0x20)]
+    assert instrs[0].operand is not None
+    assert instrs[0].operand.value == 0
+    assert instrs[0].operand.marker == -1
+    assert instrs[0].length == 1
+    assert decode(b"\x01")[0].operand.value == 0
+
+
+def test_or_without_typed_marker_keeps_implicit_zero_operand():
+    instrs = decode(b"\x03\x20")
+    assert [(i.offset, i.opnum) for i in instrs] == [(0, 3), (1, 0x20)]
+    assert instrs[0].operand is not None
+    assert instrs[0].operand.kind == "jump"
+    assert instrs[0].operand.value == 0
+    assert instrs[0].operand.marker == -1
+    assert instrs[0].length == 1

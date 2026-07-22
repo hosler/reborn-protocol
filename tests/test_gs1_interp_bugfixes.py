@@ -119,6 +119,27 @@ def test_weapon_message_codes_route_index_and_bare_selection_to_host():
     assert host.calls == [("#w", None), ("#W", 2)]
 
 
+def test_dynamic_player_prop_in_captured_weapon_construct():
+    class PlayerPropHost(MemoryHost):
+        def __init__(self):
+            super().__init__()
+            self.reads = []
+
+        def message_code(self, code, args, ctx):
+            self.reads.append(code)
+            return "live-value"
+
+    host = PlayerPropHost()
+    source = ("if (!strequals(#P(10),0)) {\xa7"
+              "setplayerprop #P9,;\xa7setplayerprop #P(10),;\xa7}")
+    run(source, host=host)
+    assert host.reads == ["#P10"]
+    assert host.log == [
+        ("setplayerprop", ["#P9", ""]),
+        ("setplayerprop", ["#P10", ""]),
+    ]
+
+
 def test_memory_host_weapon_codes_keep_empty_default():
     ctx = run("setstring this.a,#w; setstring this.b,#W(99);")
     assert this_value(ctx, "a") == ""

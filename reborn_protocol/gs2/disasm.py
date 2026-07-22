@@ -61,7 +61,10 @@ class Instruction:
 
     @property
     def length(self) -> int:
-        return 1 + (self.operand.nbytes + 1 if self.operand else 0)
+        if not self.operand:
+            return 1
+        marker_bytes = 0 if self.operand.marker < 0 else 1
+        return 1 + marker_bytes + self.operand.nbytes
 
 
 def _read(fmt: str, code: bytes, pos: int, what: str) -> int:
@@ -99,8 +102,23 @@ def decode(code: bytes) -> List[Instruction]:
 
         if op in OPERAND_OPS:
             if pos >= n:
-                raise GS2DecodeError(f"opcode {op_name(opnum)} at offset {offset} missing operand marker")
+                kind = "jump" if op in JUMP_OPS else ("index" if op in INDEX_OPS else "number")
+                operand = Operand(kind, -1, "implicit", 0)
+                instrs.append(Instruction(idx=idx, offset=offset, opnum=opnum,
+                                          operand=operand))
+                idx += 1
+                continue
             marker = code[pos]
+            if not 0xF0 <= marker <= 0xF6:
+                # The C# client treats operand markers as separate stream
+                # records. An operand-capable instruction followed directly
+                # by another opcode keeps its record's zero-initialized value.
+                kind = "jump" if op in JUMP_OPS else ("index" if op in INDEX_OPS else "number")
+                operand = Operand(kind, -1, "implicit", 0)
+                instrs.append(Instruction(idx=idx, offset=offset, opnum=opnum,
+                                          operand=operand))
+                idx += 1
+                continue
             pos += 1
             start = pos
 
