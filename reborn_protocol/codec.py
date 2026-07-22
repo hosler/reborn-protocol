@@ -306,6 +306,7 @@ class PacketBuilder:
     def write_gstring(self, value: str) -> 'PacketBuilder':
         """Write a GCHAR length-prefixed string."""
         encoded = value.encode('latin-1', errors='replace')
+        encoded = encoded[:223]
         self.write_gchar(len(encoded))
         self._data.extend(encoded)
         return self
@@ -313,6 +314,7 @@ class PacketBuilder:
     def write_gstring_short(self, value: str) -> 'PacketBuilder':
         """Write a GSHORT length-prefixed string."""
         encoded = value.encode('latin-1', errors='replace')
+        encoded = encoded[:28767]
         self.write_gshort(len(encoded))
         self._data.extend(encoded)
         return self
@@ -430,6 +432,10 @@ class Gen5Codec:
         """
         # Choose compression based on size
         compressed, compression_type = compress_data(data)
+        if len(compressed) + 1 > MAX_PACKET_LEN:
+            logger.warning("dropping oversize packet bundle (%d bytes > %d)",
+                           len(compressed) + 1, MAX_PACKET_LEN)
+            return b""
 
         # Encrypt (in place on the persistent codec, which owns the LCG
         # iterator across calls)
@@ -459,7 +465,7 @@ class Gen5Codec:
         # Check for plain zlib (first response from server)
         if compression_type == 0x78:
             try:
-                return zlib.decompress(data)
+                return decompress_data(data, CompressionType.ZLIB)
             except (zlib.error, OSError):  # corrupt compressed data
                 return None
 
@@ -528,6 +534,10 @@ class ServerCodec:
 
         # Normal packet: compress, encrypt, add type byte
         compressed, compression_type = compress_data(data)
+        if len(compressed) + 1 > MAX_PACKET_LEN:
+            logger.warning("dropping oversize packet bundle (%d bytes > %d)",
+                           len(compressed) + 1, MAX_PACKET_LEN)
+            return b""
 
         # Encrypt (in place on the persistent codec, which owns the LCG
         # iterator across calls)
@@ -554,11 +564,12 @@ class ServerCodec:
 
         # First packet is plain zlib (login packet)
         if self._first_decode:
-            self._first_decode = False
             try:
-                return zlib.decompress(data)
+                decoded = decompress_data(data, CompressionType.ZLIB)
             except (zlib.error, OSError):  # corrupt compressed data
                 return None
+            self._first_decode = False
+            return decoded
 
         # Normal packet
         compression_type = data[0]
@@ -581,7 +592,7 @@ class ServerCodec:
             return None
 
     def reset_decode_state(self) -> None:
-        """Reset decode state (e.g., for reconnection handling)."""
+        """Expect a plain first packet; callers must separately call set_key()."""
         self._first_decode = True
 
 
@@ -675,6 +686,10 @@ class Gen4Codec:
     def send_packet(self, data: bytes) -> bytes:
         """Encode packet bundle: bz2 + partial XOR, no type byte."""
         compressed = bz2.compress(data)
+        if len(compressed) > MAX_PACKET_LEN:
+            logger.warning("dropping oversize packet bundle (%d bytes > %d)",
+                           len(compressed), MAX_PACKET_LEN)
+            return b""
         self.out_codec.limit_from_type(CompressionType.BZ2)
         encrypted = self.out_codec.encrypt(compressed)
         framed = _frame(encrypted)

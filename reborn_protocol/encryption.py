@@ -12,7 +12,13 @@ algorithm is used for both encryption and decryption.
 import struct
 import zlib
 import bz2
+import logging
 from typing import Tuple
+
+
+logger = logging.getLogger(__name__)
+
+MAX_DECOMPRESSED_SIZE = 8 * 1024 * 1024
 
 
 class CompressionType:
@@ -174,11 +180,27 @@ def decompress_data(data: bytes, compression_type: int) -> bytes:
 
     Raises:
         zlib.error: If zlib decompression fails
-        bz2.BZ2DecompressError: If bz2 decompression fails
+        OSError: If bz2 decompression fails
     """
     if compression_type == CompressionType.ZLIB:
-        return zlib.decompress(data)
+        decompressor = zlib.decompressobj()
+        result = decompressor.decompress(data, max_length=MAX_DECOMPRESSED_SIZE)
+        if decompressor.unconsumed_tail:
+            logger.warning("rejecting zlib packet exceeding decompression limit (%d bytes)",
+                           MAX_DECOMPRESSED_SIZE)
+            raise zlib.error("decompressed packet exceeds size limit")
+        if not decompressor.eof:
+            raise zlib.error("incomplete or invalid compressed packet")
+        return result
     elif compression_type == CompressionType.BZ2:
-        return bz2.decompress(data)
+        decompressor = bz2.BZ2Decompressor()
+        result = decompressor.decompress(data, max_length=MAX_DECOMPRESSED_SIZE)
+        if not decompressor.eof and not decompressor.needs_input:
+            logger.warning("rejecting bz2 packet exceeding decompression limit (%d bytes)",
+                           MAX_DECOMPRESSED_SIZE)
+            raise OSError("decompressed packet exceeds size limit")
+        if not decompressor.eof:
+            raise OSError("incomplete or invalid compressed packet")
+        return result
     else:
         return data
