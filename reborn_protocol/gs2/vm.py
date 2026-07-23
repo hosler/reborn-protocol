@@ -35,7 +35,7 @@ from .container import GS2Container, parse_container
 from .disasm import Instruction, decode
 from .opcodes import Op
 from .values import (
-    ARRAY_START, GS2Object, LValue, VarRef,
+    ARRAY_START, ElemRef, GS2Object, LValue, VarRef,
     gs2_eq, to_bool, to_num, to_str, fmt_num,
 )
 
@@ -417,6 +417,15 @@ class GS2VM:
                 return
         if frame.temps.has(key):
             frame.temps.set(key, value)
+            return
+        if self.this.has(key):
+            # Mirror _lookup's resolution order (temps -> this -> globals):
+            # a bare name the this-object claims must WRITE there too, or a
+            # script's own read-after-write comes back with the stale
+            # this-value. Host this-objects that bridge to engine state (an
+            # NPC's x/y/nick etc.) rely on this so `y = 12.5;` moves the NPC
+            # instead of landing in the VM-shared globals dict.
+            self.this.set(key, value)
             return
         self.globals[key] = value
 
@@ -995,7 +1004,12 @@ class GS2VM:
         arr = self.deref(frame.stack.pop(), frame) if frame.stack else None
         if isinstance(arr, list):
             i = int(to_num(idx))
-            frame.stack.append(arr[i] if 0 <= i < len(arr) else None)
+            # Push a REFERENCE, not a value copy: GS2Engine's array access
+            # yields a variable slot, so `this.data[1]++` / `arr[i] += x`
+            # must write back into the list. ElemRef subclasses LValue, so
+            # every consumer that already derefs LValue sees the value as
+            # before; only the write-path ops behave differently (correctly).
+            frame.stack.append(ElemRef(arr, i) if 0 <= i < len(arr) else None)
         elif isinstance(arr, GS2Object):
             frame.stack.append(arr.get(to_str(idx)))
         elif isinstance(arr, str):

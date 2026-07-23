@@ -87,3 +87,22 @@ function strJoinArr() {
   temp.arr = {1, 2, 3};
   return "" @ temp.arr;
 }
+
+function elemInc() {
+  // element references: arr[i]++ / arr[i]-- must write back into the list
+  // (GS2Engine array access yields a variable slot, not a value copy) --
+  // the v6 bomber HUD's DrawHearts advances its layer index exactly this way
+  temp.arr = {5, 0};
+  temp.arr[1]++;
+  temp.arr[1]++;
+  temp.arr[0]--;
+  return temp.arr[0] * 100 + temp.arr[1];
+}
+
+function elemIncThis() {
+  this.data = {3, 0};
+  this.data[1]++;
+  this.data[0]--;
+  return this.data[0] * 100 + this.data[1];
+}
+

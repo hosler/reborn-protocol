@@ -285,6 +285,15 @@ def test_foreach(arrays):
     assert arrays.call("forEachSum") == 14
 
 
+def test_elem_inc_temp(arrays):
+    # arr[i]++/-- write back into the list (element reference, not a copy)
+    assert arrays.call("elemInc") == 402
+
+
+def test_elem_inc_this_member(arrays):
+    assert arrays.call("elemIncThis") == 201
+
+
 def test_in_array(arrays):
     assert arrays.call("inArray", "dog") == 1
     assert arrays.call("inArray", "bird") == 0

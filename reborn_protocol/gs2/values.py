@@ -71,6 +71,35 @@ class LValue:
         return f"LValue({self.obj!r}.{self.key})"
 
 
+class ElemRef(LValue):
+    """A list-element slot reference: arr[i] (OP_ARRAY on a list).
+
+    Subclasses LValue so every VM site that already understands LValue
+    (deref, _write_ref, OP_INC/OP_DEC, OP_CONV_TO_OBJECT, ...) transparently
+    handles element references too -- `this.data[1]++` and `arr[i] += x`
+    write back into the list instead of mutating a popped copy (GS2Engine
+    array access yields a variable reference, not a value copy)."""
+
+    __slots__ = ("arr", "idx")
+
+    def __init__(self, arr: list, idx: int):
+        super().__init__(None, f"[{idx}]")
+        self.arr = arr
+        self.idx = idx
+
+    def get(self) -> Any:
+        if 0 <= self.idx < len(self.arr):
+            return self.arr[self.idx]
+        return None
+
+    def set(self, value: Any) -> None:
+        if 0 <= self.idx < len(self.arr):
+            self.arr[self.idx] = value
+
+    def __repr__(self) -> str:
+        return f"ElemRef([...][{self.idx}])"
+
+
 class GS2Object:
     """A GS2 object: a case-insensitive member dict (mirrors GS2Engine's
     VariableCollection, which lowercases everything).
