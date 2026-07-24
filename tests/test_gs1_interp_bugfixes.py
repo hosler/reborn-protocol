@@ -253,3 +253,36 @@ def test_scoped_variable_named_pi_is_a_normal_variable():
     # this-scoped variable, unrelated to the pi constant.
     ctx = run("this.pi = 99;")
     assert probe(ctx, "this.pi") == 99.0
+
+
+# -- single-word `elseif` keyword (live GTA scripts) ----------------------
+def test_elseif_keyword_selects_correct_branch():
+    ctx = run('this.x=2; if (this.x==1) { this.r=1; } '
+              'elseif (this.x==2) { this.r=2; } '
+              'elseif (this.x==3) { this.r=3; } '
+              'else { this.r=4; }')
+    assert this_value(ctx, "r") == 2.0
+
+
+def test_elseif_does_not_shift_brace_accounting():
+    # An unknown-identifier `elseif` used to leave its `{` dangling, so
+    # every later statement attached to the wrong block. The trailing
+    # assignment must remain a separate top-level statement that runs.
+    src = ('if (this.a==1) { this.r=1; } '
+           'elseif (this.b==1) { this.r=2; } '
+           'this.done=1;')
+    prog = parse(src)
+    assert len(prog.body) == 2
+    ctx = run(src)
+    assert this_value(ctx, "done") == 1.0
+
+
+# -- exclusive range closers with arithmetic bounds (live GTA *Clock) -----
+def test_range_exclusive_upper_bound_with_arithmetic():
+    ctx = run('this.a=0; this.y=5; this.r=0; this.r2=0; '
+              'if (this.y in |this.a,this.a+10>) this.r=1; '
+              'if (this.y in |this.a,this.a+5>) this.r2=1; '
+              'this.done=1;')
+    assert this_value(ctx, "r") == 1.0      # 5 in [0,10) -> true
+    assert this_value(ctx, "r2") == 0.0     # 5 in [0,5) -> false
+    assert this_value(ctx, "done") == 1.0   # statement not dropped

@@ -159,12 +159,22 @@ class Parser:
 
     def parse_if(self):
         self.eat("KW_IF")
+        return self._parse_if_tail()
+
+    def _parse_if_tail(self):
+        """Condition + branches of an if, after KW_IF (or KW_ELSEIF) was
+        consumed. Classic GS1 accepts the single-word `elseif` alongside
+        `else if` (live GTA scripts use it); treating it as an unknown
+        identifier left its `{` dangling and silently shifted every brace
+        after it — whole top-level blocks then attached to the wrong if."""
         self.eat("TOKEN_PAREN_LEFT")
         cond = self.parse_expression()
         self.eat("TOKEN_PAREN_RIGHT")
         then = self.parse_block()
         els = None
-        if self.accept("KW_ELSE"):
+        if self.accept("KW_ELSEIF"):
+            els = [self._parse_if_tail()]
+        elif self.accept("KW_ELSE"):
             els = self.parse_block()
         return ast.If(cond, then, els)
 
@@ -347,9 +357,14 @@ class Parser:
     def parse_range(self):
         open_tok = self.next()  # '|' or '<'
         lo_incl = open_tok.type == "TOKEN_PIPE"
-        lo = self.parse_expression()
+        # Bounds parse BELOW the relational level: an exclusive upper bound's
+        # closing '>' (`y in |a,b>` — live GTA's *Clock settings panel) must
+        # close the range, not turn `b > )` into a comparison that then fails
+        # and silently drops the whole statement (everything after it in the
+        # function leaked to top level and ran unconditionally).
+        lo = self.parse_additive()
         self.eat("TOKEN_COMMA")
-        hi = self.parse_expression()
+        hi = self.parse_additive()
         if self.accept("TOKEN_PIPE"):
             hi_incl = True
         elif self.accept("OP_GREAT"):

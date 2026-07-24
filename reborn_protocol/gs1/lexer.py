@@ -43,7 +43,8 @@ EOF = "EOF"
 # keywords
 KW = {
     "with": "KW_WITH", "function": "KW_FUNCTION", "if": "KW_IF",
-    "else": "KW_ELSE", "for": "KW_FOR", "while": "KW_WHILE",
+    "else": "KW_ELSE", "elseif": "KW_ELSEIF", "for": "KW_FOR",
+    "while": "KW_WHILE",
     "return": "KW_RETURN", "break": "KW_BREAK", "continue": "KW_CONTINUE",
 }
 
