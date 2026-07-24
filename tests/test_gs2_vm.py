@@ -19,6 +19,8 @@ import os
 import pytest
 
 from reborn_protocol.gs2 import GS2VM, GS2Object, printf_format, gs2_eq
+from reborn_protocol.gs2.container import GS2Container
+from reborn_protocol.gs2.vm import _Frame
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "gs2", "vm")
 
@@ -34,6 +36,21 @@ BASELINE_FILES = sorted(
     glob.glob(os.path.join(BASELINES_ROOT, "**", "*.bytecode"), recursive=True)
     + glob.glob(os.path.join(VENDORED_BASELINES_ROOT, "**", "*.bytecode"), recursive=True)
 )
+
+
+def test_with_assignment_only_writes_object_that_has_name():
+    vm = GS2VM(GS2Container())
+    frame = _Frame(0, [])
+    scope = GS2Object(name="scope")
+    frame.with_stack.append(scope)
+
+    vm._assign_name("localOnly", 3, frame)
+    assert not scope.has("localOnly")
+    assert vm.globals["localonly"] == 3
+
+    scope.set("existing", 1)
+    vm._assign_name("existing", 4, frame)
+    assert scope.get("existing") == 4
 
 
 def _baseline_id(path: str) -> str:
@@ -368,7 +385,7 @@ def test_new_object_members(objects):
 
 
 def test_with_block(objects):
-    assert objects.call("withBlock") == 30
+    assert objects.call("withBlock") == 0
 
 
 def test_nested_member(objects):

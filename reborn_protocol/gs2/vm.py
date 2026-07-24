@@ -411,10 +411,10 @@ class GS2VM:
     def _assign_name(self, name: str, value: Any, frame: "_Frame") -> None:
         key = name.lower()
         if frame.with_stack:
-            wobj = frame.with_stack[-1]
-            if isinstance(wobj, GS2Object):
-                wobj.set(key, value)
-                return
+            for wobj in reversed(frame.with_stack):
+                if isinstance(wobj, GS2Object) and wobj.has(key):
+                    wobj.set(key, value)
+                    return
         if frame.temps.has(key):
             frame.temps.set(key, value)
             return
