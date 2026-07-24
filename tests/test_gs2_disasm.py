@@ -145,3 +145,37 @@ def test_or_without_typed_marker_keeps_implicit_zero_operand():
     assert instrs[0].operand.value == 0
     assert instrs[0].operand.marker == -1
     assert instrs[0].length == 1
+
+
+def test_register_ops_consume_signed_operand():
+    # Official-compiler register ops (live Login bytecode): OP_REG_STORE(45)
+    # and OP_REG_LOAD(46) carry a signed dynamic-number operand (marker
+    # 0xF3), OP_CONV_TO_PROPERTY(47) carries none. Sequence below is the
+    # exact cache pattern observed in weapon -Serverlist_Chat.
+    instrs = decode(b"\x2f\x2d\xf3\x02\x20\x2e\xf3\x02")
+    assert [i.opnum for i in instrs] == [0x2F, 0x2D, 0x20, 0x2E]
+    assert instrs[1].operand.kind == "number"
+    assert instrs[1].operand.value == 2
+    assert instrs[3].operand.value == 2
+    # instruction indices must NOT count operand bytes
+    assert [i.idx for i in instrs] == [0, 1, 2, 3]
+
+
+def test_marker_byte_is_never_an_instruction():
+    # An operand record (0xF0-0xF6) after an opcode outside OPERAND_OPS must
+    # attach to that opcode as its operand -- both the C# loader and the
+    # official interpreter treat markers as separate stream records -- and
+    # must never appear in the decoded instruction list as an opcode.
+    instrs = decode(b"\x36\xf3\x05\x07")  # OP_UNKNOWN_54, record i8=5, OP_RET
+    assert [i.opnum for i in instrs] == [0x36, 0x07]
+    assert instrs[0].operand is not None
+    assert instrs[0].operand.value == 5
+    assert all(not (0xF0 <= i.opnum <= 0xF6) for i in instrs)
+
+    # last record wins (operand-register model)
+    instrs = decode(b"\x01\xf3\x01\xf3\x07")
+    assert [i.opnum for i in instrs] == [0x01]
+    assert instrs[0].operand.value == 7
+
+    # a record with no preceding instruction is consumed and dropped
+    assert decode(b"\xf3\x05") == []

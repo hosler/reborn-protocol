@@ -49,22 +49,25 @@ class LValue:
     """A member slot reference: obj.key (OP_MEMBER_ACCESS).
 
     obj may be None for a dead reference (member access on a non-object);
-    reads yield None and writes are dropped.
+    reads yield None and writes are dropped. obj may also be a plain list
+    (member access on an array): reads/writes stay dead, but the base is
+    retained so method calls (arr.addarray(...), arr.sortbyvalue(...)) can
+    dispatch against the array instead of silently missing.
     """
 
     __slots__ = ("obj", "key")
 
-    def __init__(self, obj: Optional["GS2Object"], key: str):
+    def __init__(self, obj: Optional[Any], key: str):
         self.obj = obj
         self.key = key
 
     def get(self) -> Any:
-        if self.obj is None:
-            return None
-        return self.obj.get(self.key)
+        if isinstance(self.obj, GS2Object):
+            return self.obj.get(self.key)
+        return None
 
     def set(self, value: Any) -> None:
-        if self.obj is not None:
+        if isinstance(self.obj, GS2Object):
             self.obj.set(self.key, value)
 
     def __repr__(self) -> str:

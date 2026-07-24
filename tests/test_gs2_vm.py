@@ -469,3 +469,434 @@ def test_corpus_executes_without_crash(path):
     vm.run_toplevel()
     for fname in list(vm.functions):
         vm.call(fname)
+
+
+# --- expression-cache registers (official-compiler ops 45-47) ------------
+
+
+class _RegInstr:
+    """Minimal Instruction stand-in carrying just an operand value."""
+
+    class _Operand:
+        def __init__(self, value):
+            self.value = value
+
+    def __init__(self, value):
+        self.operand = self._Operand(value)
+
+
+def test_register_store_peeks_and_load_aliases():
+    vm = GS2VM(GS2Container())
+    frame = _Frame(0, [])
+    obj = GS2Object(name="o")
+    ref = LValue(obj, "member")
+
+    frame.stack.append(ref)
+    vm._op_conv_to_property(frame, None)
+    vm._op_reg_store(frame, _RegInstr(3))
+    # store must NOT pop -- the compiler emits OP_INDEX_DEC right after
+    assert frame.stack == [ref]
+    vm._op_index_dec(frame, None)
+    assert frame.stack == []
+
+    # the register holds the REFERENCE: later writes are visible on load
+    obj.set("member", 7)
+    vm._op_reg_load(frame, _RegInstr(3))
+    assert frame.stack[-1] is ref
+    assert vm.deref(frame.stack.pop(), frame) == 7
+
+
+def test_conv_to_property_wraps_bare_name_strings_only():
+    vm = GS2VM(GS2Container())
+    frame = _Frame(0, [])
+    frame.stack.append("somevar")
+    vm._op_conv_to_property(frame, None)
+    assert isinstance(frame.stack[-1], VarRef)
+    assert frame.stack[-1].name == "somevar"
+    frame.stack[:] = [4.0]
+    vm._op_conv_to_property(frame, None)
+    assert frame.stack == [4.0]
+
+
+def test_register_bounds_and_unset_slots():
+    from reborn_protocol.gs2.vm import MAX_REGISTER_INDEX
+    vm = GS2VM(GS2Container())
+    frame = _Frame(0, [])
+    frame.stack.append("x")
+    # out-of-range store is dropped (official machine bounds at 0x3FF)
+    vm._op_reg_store(frame, _RegInstr(MAX_REGISTER_INDEX + 1))
+    assert frame.registers == {}
+    # unset slot loads null
+    vm._op_reg_load(frame, _RegInstr(9))
+    assert frame.stack[-1] is None
+
+
+def test_register_cache_bytecode_end_to_end():
+    """Assembled replica of the live -Serverlist_Chat cache pattern:
+    `this.v; OP_CONV_TO_PROPERTY; OP_REG_STORE 0; OP_INDEX_DEC` then a write
+    to this.v, then `OP_REG_LOAD 0` returned -- the cached reference must
+    observe the later write."""
+    from reborn_protocol.gs2.container import FunctionEntry
+    code = bytes([
+        0x17,                    # OP_TYPE_ARRAY (param list start)
+        0x33,                    # OP_FUNC_PARAMS_END
+        0x0A,                    # OP_JMP (function prologue no-op)
+        0xB4,                    # OP_THIS
+        0x16, 0xF0, 0x00,        # OP_TYPE_VAR [0] 'v'
+        0x23,                    # OP_MEMBER_ACCESS -> LValue(this, 'v')
+        0x2F,                    # OP_CONV_TO_PROPERTY
+        0x2D, 0xF3, 0x00,        # OP_REG_STORE 0 (peek)
+        0x20,                    # OP_INDEX_DEC
+        0xB4,                    # OP_THIS
+        0x16, 0xF0, 0x00,        # OP_TYPE_VAR [0] 'v'
+        0x23,                    # OP_MEMBER_ACCESS
+        0x14, 0xF3, 0x05,        # OP_TYPE_NUMBER 5
+        0x32,                    # OP_ASSIGN (this.v = 5)
+        0x2E, 0xF3, 0x00,        # OP_REG_LOAD 0
+        0x07,                    # OP_RET
+    ])
+    container = GS2Container(functions=[FunctionEntry(name="f", op_index=0)],
+                             strings=["v"], code=code)
+    vm = GS2VM(container, name="regtest")
+    assert vm.call("f") == 5
+    assert vm.this.get("v") == 5
+
+
+# --- with-block `this` rebinding + construction-block semantics ----------
+
+
+def test_this_rebinds_to_innermost_with_target():
+    # official: with-entry sets this=target (non-player); WITHEND's
+    # findActionObject restores it scanning the with-list; thiso untouched
+    vm = GS2VM(GS2Container())
+    frame = _Frame(0, [])
+    outer, inner = GS2Object(name="outer"), GS2Object(name="inner")
+
+    vm._op_this(frame, None)
+    assert frame.stack.pop() is vm.this
+
+    frame.with_stack.append(outer)
+    frame.with_stack.append(inner)
+    vm._op_this(frame, None)
+    assert frame.stack.pop() is inner
+    vm._op_thiso(frame, None)
+    assert frame.stack.pop() is vm.thiso
+
+    frame.with_stack.pop()
+    vm._op_this(frame, None)
+    assert frame.stack.pop() is outer
+    frame.with_stack.pop()
+    vm._op_this(frame, None)
+    assert frame.stack.pop() is vm.this
+
+
+def test_this_rebinding_skips_player_target():
+    from reborn_protocol.gs2.vm import GS2Host
+
+    player = GS2Object(name="player")
+
+    class _Host(GS2Host):
+        def get_object(self, name):
+            return player if name == "player" else None
+
+    vm = GS2VM(GS2Container(), host=_Host())
+    frame = _Frame(0, [])
+    frame.with_stack.append(player)
+    vm._op_this(frame, None)
+    assert frame.stack.pop() is vm.this
+
+    ctrl = GS2Object(name="ctrl")
+    frame.with_stack[:] = [ctrl, player]
+    vm._op_this(frame, None)
+    assert frame.stack.pop() is ctrl
+
+
+class _ConstructionHost:
+    """Host that names created objects after the ctor arg, resolves them by
+    name, and records with-scope method calls (addcontrol)."""
+
+    def __init__(self):
+        from reborn_protocol.gs2.vm import GS2Host
+        self.objects = {}
+        self.calls = []
+
+    def create_object(self, classname, arg):
+        obj = GS2Object(name=str(arg))
+        self.objects[str(arg).lower()] = obj
+        return obj
+
+    def get_object(self, name):
+        return self.objects.get(str(name).lower())
+
+    def call_builtin(self, vm, name, args, obj=None):
+        from reborn_protocol.gs2.vm import NOT_HANDLED
+        if name == "addcontrol":
+            self.calls.append((obj, list(args)))
+            return 0.0
+        return NOT_HANDLED
+
+    def sleep(self, vm, seconds):
+        pass
+
+    def get_globals(self):
+        raise NotImplementedError
+
+
+def test_construction_block_bytecode_end_to_end():
+    """Assembled replica of the live construction pattern (weapon
+    -Serverlist_Chat): name; INLINE_NEW; 3x COPY; classname; NEW_OBJECT;
+    ASSIGN; CONV_TO_OBJECT; WITH { this.tag = 9; addcontrol("child"); }
+    WITHEND. `this.tag` must land on the object under construction, and the
+    bare addcontrol() call must dispatch to the host WITH the with-target
+    (this is how nested controls are parented -- the compiler emits
+    addcontrol into the enclosing with-scope; createObject takes no
+    parent)."""
+    from reborn_protocol.gs2.container import FunctionEntry
+    code = bytes([
+        0x17,                    # 0  OP_TYPE_ARRAY
+        0x33,                    # 1  OP_FUNC_PARAMS_END
+        0x0A,                    # 2  OP_JMP
+        0x15, 0xF0, 0x00,        # 3  OP_TYPE_STRING 'Btn'
+        0x28,                    # 4  OP_INLINE_NEW
+        0x1E, 0x1E, 0x1E,        # 5-7 OP_COPY_LAST_OP x3
+        0x15, 0xF0, 0x01,        # 8  OP_TYPE_STRING 'TestCtrl'
+        0x22,                    # 9  OP_CONV_TO_STRING
+        0x2A,                    # 10 OP_NEW_OBJECT
+        0x32,                    # 11 OP_ASSIGN
+        0x24,                    # 12 OP_CONV_TO_OBJECT
+        0x96, 0xF3, 0x19,        # 13 OP_WITH -> #25
+        0xB4,                    # 14 OP_THIS
+        0x16, 0xF0, 0x02,        # 15 OP_TYPE_VAR 'tag'
+        0x23,                    # 16 OP_MEMBER_ACCESS
+        0x14, 0xF3, 0x09,        # 17 OP_TYPE_NUMBER 9
+        0x32,                    # 18 OP_ASSIGN (this.tag = 9)
+        0x17,                    # 19 OP_TYPE_ARRAY
+        0x15, 0xF0, 0x03,        # 20 OP_TYPE_STRING 'child'
+        0x16, 0xF0, 0x04,        # 21 OP_TYPE_VAR 'addcontrol'
+        0x06,                    # 22 OP_CALL
+        0x20,                    # 23 OP_INDEX_DEC
+        0x97,                    # 24 OP_WITHEND
+        0x20,                    # 25 OP_INDEX_DEC (drop leftover name)
+        0x14, 0xF3, 0x07,        # 26 OP_TYPE_NUMBER 7
+        0x07,                    # 27 OP_RET
+    ])
+    container = GS2Container(
+        functions=[FunctionEntry(name="f", op_index=0)],
+        strings=["Btn", "TestCtrl", "tag", "child", "addcontrol"],
+        code=code)
+    host = _ConstructionHost()
+    vm = GS2VM(container, name="ctortest", host=host)
+    assert vm.call("f") == 7
+    btn = host.objects["btn"]
+    assert btn.get("tag") == 9          # this.x landed on the new object
+    assert vm.this.get("tag") is None   # not on the script object
+    assert host.calls == [(btn, ["child"])]  # dispatched with with-target
+
+
+# --- official-compiler param binding (temp.<name> LValues) ----------------
+# The live Login-server weapons (e.g. -ReShared's public.indexOf) declare
+# params that the official compiler pushes as OP_TEMP; OP_TYPE_VAR;
+# OP_MEMBER_ACCESS (an LValue on the frame temps object), not as the bare
+# VarRefs gs2test emits. OP_FUNC_PARAMS_END must bind through the reference.
+
+
+def test_func_params_bind_official_temp_member_style():
+    from reborn_protocol.gs2.container import FunctionEntry
+
+    code = bytes([
+        0x17,                    # 0 OP_TYPE_ARRAY (param list start)
+        0xBD,                    # 1 OP_TEMP
+        0x16, 0xF0, 0x01,        # 2 OP_TYPE_VAR 'b'
+        0x23,                    # 3 OP_MEMBER_ACCESS -> LValue(temps,'b')
+        0xBD,                    # 4 OP_TEMP
+        0x16, 0xF0, 0x00,        # 5 OP_TYPE_VAR 'a'
+        0x23,                    # 6 OP_MEMBER_ACCESS -> LValue(temps,'a')
+        0x33,                    # 7 OP_FUNC_PARAMS_END (binds a, then b)
+        0x0A,                    # 8 OP_JMP
+        0xBD,                    # 9 OP_TEMP
+        0x16, 0xF0, 0x00,        # 10 OP_TYPE_VAR 'a'
+        0x23,                    # 11 OP_MEMBER_ACCESS
+        0xBD,                    # 12 OP_TEMP
+        0x16, 0xF0, 0x01,        # 13 OP_TYPE_VAR 'b'
+        0x23,                    # 14 OP_MEMBER_ACCESS
+        0x3D,                    # 15 OP_SUB
+        0x07,                    # 16 OP_RET
+    ])
+    container = GS2Container(functions=[FunctionEntry(name="f", op_index=0)],
+                             strings=["a", "b"], code=code)
+    vm = GS2VM(container, name="paramtest")
+    assert vm.call("f", 7.0, 3.0) == 4.0
+    # params must not leak into globals under garbage names
+    assert vm.globals == {}
+
+
+# --- OP_CONV_TO_OBJECT CSV-string tokenization ----------------------------
+# Official switchTypeObject (quattroplay asm): a string-valued PROPERTY
+# converts to a temporary token array iff it contains a comma or is fully
+# quoted; other strings stay non-objects. Live -Mobile/Serverlist rows
+# ('"name","P 42",...') depend on this to be indexable as arrays.
+
+
+def test_conv_to_object_tokenizes_csv_string_property():
+    vm = GS2VM(GS2Container())
+    frame = _Frame(0, [])
+    vm.globals["rows"] = '"Login","P 42",desc'
+
+    frame.stack.append(VarRef("rows"))
+    vm._op_conv_to_object(frame, None)
+    assert frame.stack.pop() == ["Login", "P 42", "desc"]
+
+    obj = GS2Object(name="o")
+    obj.set("csv", "a,b,c")
+    frame.stack.append(LValue(obj, "csv"))
+    vm._op_conv_to_object(frame, None)
+    assert frame.stack.pop() == ["a", "b", "c"]
+
+    # fully-quoted single token converts too (first+last char are quotes)
+    vm.globals["one"] = '"solo"'
+    frame.stack.append(VarRef("one"))
+    vm._op_conv_to_object(frame, None)
+    assert frame.stack.pop() == ["solo"]
+
+    # plain and empty strings stay unconverted references
+    vm.globals["plain"] = "hello world"
+    frame.stack.append(VarRef("plain"))
+    vm._op_conv_to_object(frame, None)
+    ref = frame.stack.pop()
+    assert isinstance(ref, VarRef) and ref.name == "plain"
+
+    vm.globals["empty"] = ""
+    frame.stack.append(VarRef("empty"))
+    vm._op_conv_to_object(frame, None)
+    assert isinstance(frame.stack.pop(), VarRef)
+
+    # computed string ENTRIES are name-resolved, never CSV-converted
+    # (official checks the property slot, not the raw stack string)
+    frame.stack.append("x,y,z")
+    vm._op_conv_to_object(frame, None)
+    assert frame.stack.pop() == "x,y,z"
+
+    # conversion yields a TEMP: mutating it must not touch the property
+    frame.stack.append(VarRef("rows"))
+    vm._op_conv_to_object(frame, None)
+    frame.stack.pop().append("junk")
+    assert vm.globals["rows"] == '"Login","P 42",desc'
+
+
+def test_array_index_on_plain_string_pushes_zero():
+    # official getArrayCell: indexing a null-object (plain string) entry
+    # pushes 0.0, not a character
+    vm = GS2VM(GS2Container())
+    frame = _Frame(0, [])
+    frame.stack.extend(["hello", 1.0])
+    vm._op_array(frame, None)
+    assert frame.stack.pop() == 0.0
+
+
+# --- array method dispatch (addarray / sortbyvalue / friends) -------------
+# -Mobile/Serverlist sortServers() calls gold_servers.sortbyvalue(...) and
+# sorted_servers.addarray(...): OP_MEMBER_ACCESS on a list base must retain
+# the list so the call dispatches, and the VM implements the universal
+# array methods natively (host still gets first refusal).
+
+
+def test_member_access_retains_list_base():
+    vm = GS2VM(GS2Container())
+    frame = _Frame(0, [])
+    lst = [1.0, 2.0]
+    frame.stack.extend([lst, VarRef("addarray")])
+    vm._op_member_access(frame, None)
+    ref = frame.stack.pop()
+    assert isinstance(ref, LValue) and ref.obj is lst and ref.key == "addarray"
+    # reads/writes through a list-based LValue stay dead
+    assert ref.get() is None
+    ref.set(5)
+    assert lst == [1.0, 2.0]
+
+
+def test_list_methods_native_dispatch():
+    vm = GS2VM(GS2Container())
+    frame = _Frame(0, [])
+
+    lst = [1.0]
+    assert vm._call_target(LValue(lst, "addarray"), [[2.0, 3.0]], frame) is None
+    assert lst == [1.0, 2.0, 3.0]
+
+    vm._call_target(LValue(lst, "add"), ["x"], frame)
+    assert lst == [1.0, 2.0, 3.0, "x"]
+    assert vm._call_target(LValue(lst, "size"), [], frame) == 4.0
+    assert vm._call_target(LValue(lst, "index"), [3.0], frame) == 2.0
+    vm._call_target(LValue(lst, "clear"), [], frame)
+    assert lst == []
+
+    rows = ['"b",20', '"a",5', '"c",100']
+    vm._call_target(LValue(rows, "sortbyvalue"), [1.0, "float", 1.0], frame)
+    assert rows == ['"a",5', '"b",20', '"c",100']
+    vm._call_target(LValue(rows, "sortbyvalue"), [1.0, "float", 0.0], frame)
+    assert rows == ['"c",100', '"b",20', '"a",5']
+    vm._call_target(LValue(rows, "sortbyvalue"), [0.0, "string", 1.0], frame)
+    assert rows == ['"a",5', '"b",20', '"c",100']
+
+    # unknown methods still fall through to builtins_missing, returning 0.0
+    assert vm._call_target(LValue(lst, "definitelynotamethod"), [], frame) == 0.0
+
+
+def test_member_write_on_undefined_bare_name_vivifies_holder():
+    """`tmp.node = x` with no prior `tmp` (a plain identifier, NOT the
+    temp. prefix -- the live Login serverlist builder's idiom): GS2Engine's
+    variable collection auto-creates the holder object on member WRITE.
+    Reads through an undefined name stay None and create nothing."""
+    vm = GS2VM(GS2Container())
+    frame = _Frame(0, [])
+
+    # write path: tmp.node = 5 vivifies global object "tmp"
+    frame.stack.extend([VarRef("tmp"), VarRef("node")])
+    vm._op_member_access(frame, None)
+    ref = frame.stack.pop()
+    assert ref.get() is None                      # read before write: dead
+    assert "tmp" not in vm.globals                # ...and nothing created
+    ref.set(5)
+    holder = vm.globals["tmp"]
+    assert isinstance(holder, GS2Object)
+    assert holder.get("node") == 5
+
+    # subsequent access resolves the now-real object (plain LValue path)
+    frame.stack.extend([VarRef("tmp"), VarRef("node")])
+    vm._op_member_access(frame, None)
+    assert frame.stack.pop().get() == 5
+
+    # pure read path never vivifies
+    frame.stack.extend([VarRef("ghost"), VarRef("x")])
+    vm._op_member_access(frame, None)
+    assert frame.stack.pop().get() is None
+    assert "ghost" not in vm.globals
+
+    # a name that HOLDS a value (even a plain number) is defined -- member
+    # writes through it remain a dead ref (conservative: only genuinely
+    # unresolved names vivify; a scalar is never silently replaced)
+    scope = GS2Object(name="scope")
+    scope.set("tmp2", 0)
+    frame.with_stack.append(scope)
+    frame.stack.extend([VarRef("tmp2"), VarRef("y")])
+    vm._op_member_access(frame, None)
+    frame.stack.pop().set(7)
+    assert scope.get("tmp2") == 0
+    frame.with_stack.pop()
+
+
+def test_starts_ends_are_case_insensitive():
+    # Reference semantics: the C# client's engine dispatches OP_OBJ_STARTS /
+    # OP_OBJ_ENDS to TString::startsIgnoreCase / endsIgnoreCase (FourPlay
+    # TScriptMachine::executeScript, caseD_74) -- the live Login server's
+    # isLoginServer() relies on "Login".starts("login") being true.
+    vm = GS2VM(GS2Container())
+    frame = _Frame(0, [])
+    frame.stack.extend(["Login", "login"])
+    vm._op_obj_starts(frame, None)
+    assert frame.stack.pop() is True
+    frame.stack.extend(["MOBILE", "bile"])
+    vm._op_obj_ends(frame, None)
+    assert frame.stack.pop() is True
+    frame.stack.extend(["Login", "xyz"])
+    vm._op_obj_starts(frame, None)
+    assert frame.stack.pop() is False

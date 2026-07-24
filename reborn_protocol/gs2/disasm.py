@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 from .container import GS2Container, FunctionEntry
 from .opcodes import Op, op_name, NUMBER_OPS, INDEX_OPS, OPERAND_OPS
@@ -74,15 +74,60 @@ def _read(fmt: str, code: bytes, pos: int, what: str) -> int:
     return struct.unpack_from(fmt, code, pos)[0]
 
 
+def _operand_kind(op: Optional[Op]) -> str:
+    return "jump" if op in JUMP_OPS else ("index" if op in INDEX_OPS else "number")
+
+
+def _parse_typed_operand(op: Optional[Op], marker: int, code: bytes,
+                         pos: int) -> Tuple[Operand, int]:
+    """Parse one typed operand record; *pos* points just past the marker
+    byte. Returns the Operand and the position after the operand data."""
+    start = pos
+    if marker == 0xF0:
+        value = _read(">B", code, pos, "u8"); pos += 1
+        operand = Operand("jump" if op in JUMP_OPS else "index", marker, "u8", value)
+    elif marker == 0xF1:
+        value = _read(">H", code, pos, "u16"); pos += 2
+        operand = Operand("jump" if op in JUMP_OPS else "index", marker, "u16", value)
+    elif marker == 0xF2:
+        value = _read(">I", code, pos, "u32"); pos += 4
+        operand = Operand("jump" if op in JUMP_OPS else "index", marker, "u32", value)
+    elif marker == 0xF3:
+        value = _read(">b", code, pos, "i8"); pos += 1
+        operand = Operand("jump" if op in JUMP_OPS else "number", marker, "i8", value)
+    elif marker == 0xF4:
+        value = _read(">h", code, pos, "i16"); pos += 2
+        operand = Operand("jump" if op in JUMP_OPS else "number", marker, "i16", value)
+    elif marker == 0xF5:
+        value = _read(">i", code, pos, "i32"); pos += 4
+        operand = Operand("jump" if op in JUMP_OPS else "number", marker, "i32", value)
+    else:  # 0xF6
+        end = code.find(b"\x00", pos)
+        if end == -1:
+            raise GS2DecodeError(f"unterminated float literal at offset {pos}")
+        text = code[pos:end].decode("ascii", errors="replace")
+        pos = end + 1
+        try:
+            fval = float(text)
+        except ValueError:
+            fval = 0.0
+        operand = Operand("float", marker, "cstr", fval, raw_text=text)
+    operand.nbytes = pos - start
+    return operand, pos
+
+
 def decode(code: bytes) -> List[Instruction]:
     """Decode a raw GS2 opcode stream into a flat instruction list.
 
     Raises GS2DecodeError on truncated/malformed operand data. Unknown
-    opcode *numbers* (no case in Op) are not an error here -- per our
-    verified operand table (opcodes.py OPERAND_OPS), every operand-bearing
-    opcode is enumerated exhaustively from the compiler's emit call sites,
-    so any opcode value not in that set is decoded as a bare zero-operand
-    instruction, known or not.
+    opcode *numbers* (no case in Op) are not an error here: they decode as
+    bare instructions. Operand markers (0xF0-0xF6) are separate stream
+    records attached to the preceding opcode -- both the C# client's loader
+    and the official interpreter (quattroplay executeScript has jumptable
+    cases for 0xF0-0xF6 that merely load the operand register) treat them
+    that way, so a marker byte is NEVER an instruction: for ops in
+    OPERAND_OPS we attach it eagerly, and for any other opcode a trailing
+    marker record still attaches to it instead of desyncing the stream.
     """
     instrs: List[Instruction] = []
     pos = 0
@@ -92,72 +137,36 @@ def decode(code: bytes) -> List[Instruction]:
     while pos < n:
         opnum = code[pos]
         offset = pos
-        pos += 1
 
-        operand = None
         try:
             op = Op(opnum)
         except ValueError:
             op = None
 
-        if op in OPERAND_OPS:
-            if pos >= n:
-                kind = "jump" if op in JUMP_OPS else ("index" if op in INDEX_OPS else "number")
-                operand = Operand(kind, -1, "implicit", 0)
-                instrs.append(Instruction(idx=idx, offset=offset, opnum=opnum,
-                                          operand=operand))
-                idx += 1
-                continue
-            marker = code[pos]
-            if not 0xF0 <= marker <= 0xF6:
-                # The C# client treats operand markers as separate stream
-                # records. An operand-capable instruction followed directly
-                # by another opcode keeps its record's zero-initialized value.
-                kind = "jump" if op in JUMP_OPS else ("index" if op in INDEX_OPS else "number")
-                operand = Operand(kind, -1, "implicit", 0)
-                instrs.append(Instruction(idx=idx, offset=offset, opnum=opnum,
-                                          operand=operand))
-                idx += 1
-                continue
+        if 0xF0 <= opnum <= 0xF6:
+            # Operand record in opcode position: belongs to the previous
+            # instruction (whatever it was -- see docstring). Consuming it
+            # here guarantees a marker byte is never executed as an opcode.
             pos += 1
-            start = pos
+            prev = instrs[-1] if instrs else None
+            prev_op = prev.op if prev is not None else None
+            operand, pos = _parse_typed_operand(prev_op, opnum, code, pos)
+            if prev is not None:
+                prev.operand = operand  # last record wins (operand register)
+            continue
 
-            if marker == 0xF0:
-                value = _read(">B", code, pos, "u8"); pos += 1
-                operand = Operand("jump" if op in JUMP_OPS else "index", marker, "u8", value)
-            elif marker == 0xF1:
-                value = _read(">H", code, pos, "u16"); pos += 2
-                operand = Operand("jump" if op in JUMP_OPS else "index", marker, "u16", value)
-            elif marker == 0xF2:
-                value = _read(">I", code, pos, "u32"); pos += 4
-                operand = Operand("jump" if op in JUMP_OPS else "index", marker, "u32", value)
-            elif marker == 0xF3:
-                value = _read(">b", code, pos, "i8"); pos += 1
-                operand = Operand("jump" if op in JUMP_OPS else "number", marker, "i8", value)
-            elif marker == 0xF4:
-                value = _read(">h", code, pos, "i16"); pos += 2
-                operand = Operand("jump" if op in JUMP_OPS else "number", marker, "i16", value)
-            elif marker == 0xF5:
-                value = _read(">i", code, pos, "i32"); pos += 4
-                operand = Operand("jump" if op in JUMP_OPS else "number", marker, "i32", value)
-            elif marker == 0xF6:
-                end = code.find(b"\x00", pos)
-                if end == -1:
-                    raise GS2DecodeError(f"unterminated float literal at offset {pos}")
-                text = code[pos:end].decode("ascii", errors="replace")
-                pos = end + 1
-                try:
-                    fval = float(text)
-                except ValueError:
-                    fval = 0.0
-                operand = Operand("float", marker, "cstr", fval, raw_text=text)
+        pos += 1
+        operand = None
+
+        if op in OPERAND_OPS:
+            marker = code[pos] if pos < n else -1
+            if not 0xF0 <= marker <= 0xF6:
+                # No typed record follows: the operand keeps its
+                # zero-initialized value (implicit-zero record).
+                operand = Operand(_operand_kind(op), -1, "implicit", 0)
             else:
-                raise GS2DecodeError(
-                    f"opcode {op_name(opnum)} at offset {offset} has unknown operand "
-                    f"marker 0x{marker:02X} (expected 0xF0-0xF6)"
-                )
-
-            operand.nbytes = pos - start
+                pos += 1
+                operand, pos = _parse_typed_operand(op, marker, code, pos)
 
         instrs.append(Instruction(idx=idx, offset=offset, opnum=opnum, operand=operand))
         idx += 1

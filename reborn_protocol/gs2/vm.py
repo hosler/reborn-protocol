@@ -31,6 +31,7 @@ import random as _random
 import re
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
+from ..gs1.csv import gs1_csv_split
 from .container import GS2Container, parse_container
 from .disasm import Instruction, decode
 from .opcodes import Op
@@ -49,6 +50,11 @@ NOT_HANDLED = object()
 #: index controls array size: OP_ARRAY_NEW(_MULTIDIM), OP_SETARRAY,
 #: OP_ARRAY_ASSIGN, OP_OBJ_REPLACESTRING.
 MAX_ARRAY_INDEX = 1 << 20
+
+#: register-file bound for OP_REG_STORE/OP_REG_LOAD -- the official
+#: interpreter bounds the index at 0x3FF (quattroplay executeScript
+#: caseD_2d/caseD_2e both compare against $0x3ff before touching the file).
+MAX_REGISTER_INDEX = 0x3FF
 
 
 class GS2Host:
@@ -77,6 +83,48 @@ class GS2Host:
         """Storage for unqualified variable writes. Hosts may share one dict
         across scripts (Reborn client globals are shared)."""
         raise NotImplementedError
+
+
+class _NameVivifyRef(LValue):
+    """Member slot behind an UNDEFINED (or non-object) bare global/local
+    name. Write semantics match GS2Engine's variable collection: the first
+    member WRITE auto-creates the holder object and assigns it through the
+    normal scope chain (temps -> this -> globals, honoring with-scope and
+    host this-object claims via _assign_name); reads before any write yield
+    None and create nothing. Without this, `tmp.node = <treenode>` in the
+    live Login serverlist builder silently dropped every node id/sortgroup/
+    icon write (tmp is a plain identifier there, not the temp. prefix)."""
+
+    __slots__ = ("_vm", "_frame", "_varname")
+
+    def __init__(self, vm: "GS2VM", frame, varname: str, key: str):
+        super().__init__(None, key)
+        self._vm = vm
+        self._frame = frame
+        self._varname = varname
+
+    def set(self, value) -> None:
+        if not isinstance(self.obj, GS2Object):
+            holder = self._vm._lookup(self._varname, self._frame)
+            if not isinstance(holder, GS2Object):
+                holder = GS2Object(name=self._varname)
+                self._vm._assign_name(self._varname, holder, self._frame)
+            self.obj = holder
+        self.obj.set(self.key, value)
+
+
+def _csv_tokens(value: str) -> Optional[List[str]]:
+    """Official OP_CONV_TO_OBJECT string-property rule
+    (TScriptStackEntry::switchTypeObject, quattroplay): a string-valued
+    property converts to a temporary token ARRAY iff it contains a comma or
+    is fully quoted (first and last char '"'); any other string stays a
+    non-object (null-object entry). The token dialect is the shared engine
+    CSV format (gs1_csv_split). The conversion result is a TEMP -- writes
+    into it never reach the source variable -- which a fresh list models
+    exactly."""
+    if "," in value or (len(value) >= 2 and value[0] == '"' and value[-1] == '"'):
+        return gs1_csv_split(value)
+    return None
 
 
 _FMT_RE = re.compile(r"%(-?\d*)(?:\.(\d+))?([dioxXucsfeEgG%])")
@@ -556,7 +604,23 @@ class GS2VM:
         frame.stack.append(math.pi)
 
     def _op_this(self, frame, instr):
-        frame.stack.append(self.this)
+        frame.stack.append(self._current_this(frame))
+
+    def _current_this(self, frame: "_Frame") -> Any:
+        """Official semantics (quattroplay executeScript caseD_96 sets
+        this=target on with-entry for non-player targets; caseD_97 calls
+        findActionObject(), which resets this=thiso then rebinds it to the
+        innermost non-player with-target): inside `with (obj)` blocks --
+        which includes inline-new construction blocks -- OP_THIS yields the
+        innermost with-target, so `this.field = x` inside `new Ctrl() {...}`
+        lands on the object under construction. OP_THISO is untouched by
+        with (machine slot 0x70 vs this at 0x78)."""
+        if frame.with_stack:
+            player = self.host.get_object("player") if self.host is not None else None
+            for wobj in reversed(frame.with_stack):
+                if wobj is not player:
+                    return wobj
+        return self.this
 
     def _op_thiso(self, frame, instr):
         frame.stack.append(self.thiso)
@@ -590,6 +654,34 @@ class GS2VM:
         if frame.stack:
             frame.stack.pop()
 
+    # --- expression-cache registers (official-compiler-only ops 45-47; see
+    #     opcodes.py Op enum comment for the reversed-interpreter evidence).
+    #     Emitted as `expr; OP_CONV_TO_PROPERTY; OP_REG_STORE n;
+    #     OP_INDEX_DEC` to cache, and `OP_REG_LOAD n` to recall -- notably
+    #     for foreach loop variables/collections and repeated params. ---
+
+    def _op_conv_to_property(self, frame, instr):
+        # official: TScriptStackEntry::switchTypeProperty(machine, true) on
+        # the stack top, in place. Our VarRef/LValue entries already ARE
+        # property references, so only a bare name string needs converting.
+        if frame.stack and isinstance(frame.stack[-1], str):
+            frame.stack[-1] = VarRef(frame.stack[-1])
+        return None
+
+    def _op_reg_store(self, frame, instr):
+        # store the stack top (usually a reference -- the preceding
+        # OP_CONV_TO_PROPERTY guarantees it) WITHOUT popping; the compiler
+        # emits OP_INDEX_DEC right after to drop it.
+        n = int(instr.operand.value) if instr.operand else 0
+        if frame.stack and 0 <= n <= MAX_REGISTER_INDEX:
+            frame.registers[n] = frame.stack[-1]
+        return None
+
+    def _op_reg_load(self, frame, instr):
+        n = int(instr.operand.value) if instr.operand else 0
+        frame.stack.append(frame.registers.get(n))
+        return None
+
     # --- conversions / member access ---
 
     def _op_conv_to_float(self, frame, instr):
@@ -614,21 +706,51 @@ class GS2VM:
             v = self._lookup(name, frame)
             if v is None and self.host is not None:
                 v = self.host.get_object(name)
-            frame.stack.append(v if isinstance(v, (list, GS2Object)) else raw)
+            if isinstance(v, (list, GS2Object)):
+                frame.stack.append(v)
+                return
+            # CSV-shaped string property -> temp token array (official
+            # switchTypeObject; live serverlist rows depend on this).
+            # Applies only to resolved property values (VarRef), not to
+            # computed string entries -- official checks the property slot.
+            if isinstance(raw, VarRef) and isinstance(v, str):
+                toks = _csv_tokens(v)
+                if toks is not None:
+                    frame.stack.append(toks)
+                    return
+            frame.stack.append(raw)
         elif isinstance(raw, LValue):
             value = raw.get()
-            frame.stack.append(
-                value if isinstance(value, (list, GS2Object)) else raw)
+            if isinstance(value, (list, GS2Object)):
+                frame.stack.append(value)
+                return
+            if isinstance(value, str):
+                toks = _csv_tokens(value)
+                if toks is not None:
+                    frame.stack.append(toks)
+                    return
+            frame.stack.append(raw)
         else:
             frame.stack.append(raw)
 
     def _op_member_access(self, frame, instr):
         namev = frame.stack.pop() if frame.stack else None
-        base = frame.stack.pop() if frame.stack else None
+        base_entry = frame.stack.pop() if frame.stack else None
         name = namev.name if isinstance(namev, VarRef) else to_str(self.deref(namev, frame))
-        base = self.deref(base, frame) if isinstance(base, (VarRef, LValue)) else base
-        if isinstance(base, GS2Object):
+        base = (self.deref(base_entry, frame)
+                if isinstance(base_entry, (VarRef, LValue)) else base_entry)
+        if isinstance(base, (GS2Object, list)):
+            # lists ride along so array method calls can dispatch (LValue
+            # reads/writes on a list base are still dead -- see values.py)
             frame.stack.append(LValue(base, name))
+        elif base is None and isinstance(base_entry, VarRef):
+            # Member access through a bare name holding no object yet
+            # (`tmp.node = x` with no prior `tmp`): GS2Engine's variable
+            # collection auto-creates the holder object on member WRITE
+            # (live Login -Rescripted/Serverlist stores its serverlist tree
+            # nodes under exactly this shape), while a plain READ stays None
+            # and creates nothing -- see _NameVivifyRef.
+            frame.stack.append(_NameVivifyRef(self, frame, base_entry.name, name))
         else:
             frame.stack.append(LValue(None, name))
 
@@ -703,11 +825,20 @@ class GS2VM:
 
     def _op_func_params_end(self, frame, instr):
         # param names were pushed in reverse declaration order, so pop order
-        # is declaration order; bind against caller args positionally
+        # is declaration order; bind against caller args positionally.
+        # gs2test pushes bare VarRefs, but the official compiler pushes each
+        # param as a temp.<name> reference (OP_TEMP; OP_TYPE_VAR;
+        # OP_MEMBER_ACCESS -> LValue on the frame temps object) -- seen in
+        # every live Login-server weapon. Bind through the reference in that
+        # case or all params silently become None.
         names = self._pop_args(frame)
         for i, nv in enumerate(names):
+            value = frame.args[i] if i < len(frame.args) else None
+            if isinstance(nv, LValue) and nv.obj is not None:
+                nv.set(value)
+                continue
             name = nv.name if isinstance(nv, VarRef) else to_str(nv)
-            frame.temps.set(name, frame.args[i] if i < len(frame.args) else None)
+            frame.temps.set(name, value)
         return None
 
     def _op_inc(self, frame, instr):
@@ -962,14 +1093,20 @@ class GS2VM:
         frame.stack.append(s[start:] if length < 0 else s[start:start + length])
 
     def _op_obj_starts(self, frame, instr):
+        # CASE-INSENSITIVE: the reference VM's OP_OBJ_STARTS handler calls
+        # TString::startsIgnoreCase (FourPlay TScriptMachine::executeScript,
+        # caseD_74) -- Login's isLoginServer() relies on
+        # "Login".starts("login") being true.
         prefix = to_str(self.deref(frame.stack.pop(), frame)) if frame.stack else ""
         s = to_str(self.deref(frame.stack.pop(), frame)) if frame.stack else ""
-        frame.stack.append(s.startswith(prefix))
+        frame.stack.append(s.casefold().startswith(prefix.casefold()))
 
     def _op_obj_ends(self, frame, instr):
+        # CASE-INSENSITIVE like OP_OBJ_STARTS (TString::endsIgnoreCase in
+        # the same reference dispatch).
         suffix = to_str(self.deref(frame.stack.pop(), frame)) if frame.stack else ""
         s = to_str(self.deref(frame.stack.pop(), frame)) if frame.stack else ""
-        frame.stack.append(s.endswith(suffix))
+        frame.stack.append(s.casefold().endswith(suffix.casefold()))
 
     def _op_obj_tokenize(self, frame, instr):
         delims = to_str(self.deref(frame.stack.pop(), frame)) if frame.stack else " ,"
@@ -1015,8 +1152,12 @@ class GS2VM:
         elif isinstance(arr, GS2Object):
             frame.stack.append(arr.get(to_str(idx)))
         elif isinstance(arr, str):
-            i = int(to_num(idx))
-            frame.stack.append(arr[i] if 0 <= i < len(arr) else "")
+            # Official getArrayCell: a string that survived OP_CONV_TO_OBJECT
+            # unconverted (no comma, not fully quoted) is a null-object entry
+            # and indexing it pushes 0.0 -- NOT a character (charAt is a
+            # separate op). CSV-shaped strings never reach here: the
+            # preceding OP_CONV_TO_OBJECT already tokenized them.
+            frame.stack.append(0.0)
         else:
             frame.stack.append(None)
 
@@ -1250,19 +1391,36 @@ class GS2VM:
                 if res is not NOT_HANDLED:
                     cls.builtins_called[name] = cls.builtins_called.get(name, 0) + 1
                     return res
+            if isinstance(obj, list):
+                res = self._list_method(obj, name, args)
+                if res is not NOT_HANDLED:
+                    cls.builtins_called[name] = cls.builtins_called.get(name, 0) + 1
+                    return res
             cls.builtins_missing[name] = cls.builtins_missing.get(name, 0) + 1
             self._log_once(("method", name), "GS2 %s: unknown method %s()", self.name, name)
             return 0.0
 
         if isinstance(target, VarRef):
             name = target.name.lower()
-            # with-scope function member
+            # with-scope resolution first (official machine: bare-name calls
+            # inside with-blocks resolve against the with-list innermost-out
+            # before anything else). This is how construction blocks parent
+            # nested controls: the compiler emits `addcontrol(<child name>)`
+            # after each nested new's WITHEND, resolved as a METHOD of the
+            # enclosing with-target -- so host object methods must be
+            # reachable here (host.call_builtin with obj=), not only
+            # callable members.
             if frame.with_stack:
                 for wobj in reversed(frame.with_stack):
                     m = wobj.get(name)
                     if callable(m):
                         cls.builtins_called[name] = cls.builtins_called.get(name, 0) + 1
                         return m(*args)
+                    if self.host is not None:
+                        res = self.host.call_builtin(self, name, args, obj=wobj)
+                        if res is not NOT_HANDLED:
+                            cls.builtins_called[name] = cls.builtins_called.get(name, 0) + 1
+                            return res
             # script's own functions (incl. joined classes)
             idx = self.functions.get(name)
             if idx is not None:
@@ -1296,9 +1454,59 @@ class GS2VM:
             return target(*args)
         return 0.0
 
+    @staticmethod
+    def _list_method(arr: list, name: str, args: List[Any]) -> Any:
+        """Universal array methods dispatched at runtime (not compiled to
+        opcodes): the subset the live Login-server corpus exercises plus the
+        trivial aliases. All mutations are in place (official TGraalVar
+        methods mutate the underlying var). Host builtins are consulted
+        first, so a richer host can override any of these."""
+        if name == "add":
+            arr.append(args[0] if args else None)
+            return None
+        if name == "addarray":
+            other = args[0] if args else None
+            if isinstance(other, list):
+                arr.extend(other)
+            return None
+        if name == "size":
+            return float(len(arr))
+        if name == "clear":
+            arr.clear()
+            return None
+        if name == "index":
+            value = args[0] if args else None
+            for i, x in enumerate(arr):
+                if gs2_eq(x, value):
+                    return float(i)
+            return -1.0
+        if name == "sortbyvalue":
+            # sortbyvalue(fieldindex, "float"|"string", ascending): entries
+            # are CSV-row strings (or nested lists); sort by field
+            # <fieldindex>, numerically for "float". Seen live in
+            # -Mobile/Serverlist sortServers().
+            idx = int(to_num(args[0])) if len(args) > 0 else 0
+            as_float = to_str(args[1] if len(args) > 1 else "") == "float"
+            ascending = to_bool(args[2]) if len(args) > 2 else True
+
+            def field(row: Any) -> Any:
+                if isinstance(row, list):
+                    cell = row[idx] if 0 <= idx < len(row) else ""
+                else:
+                    toks = gs1_csv_split(to_str(row))
+                    cell = toks[idx] if 0 <= idx < len(toks) else ""
+                return to_num(cell) if as_float else to_str(cell)
+
+            try:
+                arr.sort(key=field, reverse=not ascending)
+            except TypeError:
+                pass
+            return None
+        return NOT_HANDLED
+
 
 class _Frame:
-    __slots__ = ("ip", "stack", "temps", "args", "with_stack")
+    __slots__ = ("ip", "stack", "temps", "args", "with_stack", "registers")
 
     def __init__(self, ip: int, args: List[Any]):
         self.ip = ip
@@ -1306,6 +1514,11 @@ class _Frame:
         self.temps = GS2Object(name="temp")
         self.args = args
         self.with_stack: List[GS2Object] = []
+        # expression-cache register file (OP_REG_STORE/OP_REG_LOAD). The
+        # official machine's file lives on the machine, but slot indices are
+        # compiler-assigned per function body, so per-frame keeps nested
+        # script-function calls from clobbering their caller's slots.
+        self.registers: Dict[int, Any] = {}
 
 
 class _ReturnValue(Exception):

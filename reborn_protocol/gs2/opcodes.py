@@ -53,9 +53,25 @@ class Op(IntEnum):
     OP_NEW_OBJECT = 42
     OP_OBJ_FROM_STR = 43
     OP_INLINE_CONDITIONAL = 44
-    OP_UNKNOWN_45 = 45
-    OP_UNKNOWN_46 = 46
-    OP_UNKNOWN_47 = 47
+    # 45-47 have no case in the open-source gs2parser (opcodes.h keeps them
+    # as OP_UNKNOWN_*): only the official compiler emits them, as an
+    # expression-cache for repeated subexpressions (notably foreach loop
+    # variables/collections). Semantics recovered from the reversed official
+    # client interpreter, Preagonal/FourPlay/quattroplay/asm/TScriptMachine/
+    # _ZN14TScriptMachine13executeScriptEv.s:
+    #   caseD_2d (45): registers[n].copyFrom(stackTop) -- store the current
+    #     stack top into VM register n (operand, bounded 0..0x3FF) WITHOUT
+    #     popping (the compiler emits OP_INDEX_DEC right after).
+    #   caseD_2e (46): push a copy of registers[n] (after
+    #     switchTypeProperty(true) on the register).
+    #   caseD_2f (47): TScriptStackEntry::switchTypeProperty(machine, true)
+    #     on the stack top in place -- convert it to a variable/property
+    #     reference; always emitted immediately before OP_REG_STORE.
+    # Cross-reference: Preagonal/GraalNetwork/gs2-analysis .../Opcode.kt
+    # names them SET/GET/MARK_LOOP_VARIABLE (0x2d/0x2e/0x2f).
+    OP_REG_STORE = 45
+    OP_REG_LOAD = 46
+    OP_CONV_TO_PROPERTY = 47
 
     OP_ASSIGN = 50
     OP_FUNC_PARAMS_END = 51
@@ -166,6 +182,11 @@ OPERAND_OPS = frozenset({
     Op.OP_TYPE_VAR,
     Op.OP_WITH,
     Op.OP_FOREACH,
+    # Official-compiler-only register ops (never emitted by gs2test; see the
+    # Op enum comment). Operand = register index; live Login bytecode emits
+    # it with the signed 0xF3 marker.
+    Op.OP_REG_STORE,
+    Op.OP_REG_LOAD,
 })
 
 #: Ops for which the dynamic operand is a signed number (literal constant or
@@ -175,6 +196,7 @@ OPERAND_OPS = frozenset({
 NUMBER_OPS = frozenset({
     Op.OP_SET_INDEX, Op.OP_SET_INDEX_TRUE, Op.OP_OR, Op.OP_IF, Op.OP_AND,
     Op.OP_TYPE_NUMBER, Op.OP_WITH, Op.OP_FOREACH,
+    Op.OP_REG_STORE, Op.OP_REG_LOAD,
 })
 
 #: Ops for which the dynamic operand is an unsigned index into the string
