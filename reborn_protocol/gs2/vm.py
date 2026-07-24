@@ -614,9 +614,11 @@ class GS2VM:
             v = self._lookup(name, frame)
             if v is None and self.host is not None:
                 v = self.host.get_object(name)
-            frame.stack.append(v)
+            frame.stack.append(v if isinstance(v, (list, GS2Object)) else raw)
         elif isinstance(raw, LValue):
-            frame.stack.append(raw.get())
+            value = raw.get()
+            frame.stack.append(
+                value if isinstance(value, (list, GS2Object)) else raw)
         else:
             frame.stack.append(raw)
 

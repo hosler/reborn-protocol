@@ -20,6 +20,7 @@ import pytest
 
 from reborn_protocol.gs2 import GS2VM, GS2Object, printf_format, gs2_eq
 from reborn_protocol.gs2.container import GS2Container
+from reborn_protocol.gs2.values import LValue, VarRef
 from reborn_protocol.gs2.vm import _Frame
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "gs2", "vm")
@@ -51,6 +52,33 @@ def test_with_assignment_only_writes_object_that_has_name():
     scope.set("existing", 1)
     vm._assign_name("existing", 4, frame)
     assert scope.get("existing") == 4
+
+
+def test_conv_to_object_preserves_unset_array_targets():
+    vm = GS2VM(GS2Container())
+    frame = _Frame(0, [])
+    obj = GS2Object(name="target")
+
+    member = LValue(obj, "rows")
+    frame.stack.append(member)
+    vm._op_conv_to_object(frame, None)
+    assert frame.stack.pop() is member
+    frame.stack.extend([member, 3])
+    vm._op_setarray(frame, None)
+    assert obj.get("rows") == [0.0, 0.0, 0.0]
+
+    global_ref = VarRef("rows")
+    frame.stack.append(global_ref)
+    vm._op_conv_to_object(frame, None)
+    assert frame.stack.pop() is global_ref
+    frame.stack.extend([global_ref, 2])
+    vm._op_setarray(frame, None)
+    assert vm.globals["rows"] == [0.0, 0.0]
+
+    obj.set("rows", [1])
+    frame.stack.append(member)
+    vm._op_conv_to_object(frame, None)
+    assert frame.stack.pop() == [1]
 
 
 def _baseline_id(path: str) -> str:
