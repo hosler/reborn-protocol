@@ -18,9 +18,9 @@ import os
 
 import pytest
 
-from reborn_protocol.gs2 import GS2VM, GS2Object, printf_format, gs2_eq
+from reborn_protocol.gs2 import GS2VM, GS2Object, printf_format, gs2_eq, to_str
 from reborn_protocol.gs2.container import GS2Container
-from reborn_protocol.gs2.values import LValue, VarRef
+from reborn_protocol.gs2.values import LValue, VarRef, fmt_num, gs2_compare
 from reborn_protocol.gs2.vm import _Frame
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "gs2", "vm")
@@ -421,7 +421,13 @@ def test_nested_member(objects):
 
 
 def test_obj_type(objects):
-    assert objects.call("objType") == 13  # float=0, string=1, array=3
+    # `n.type()*100 + s.type()*10 + arr.type()` where n=5, s="x", arr={1}.
+    # opcodes.h guesses OP_OBJ_TYPE is a 0/1/2/3 type tag (which would make
+    # this 13); the official handler only ever pushes 3.0 (an object holding
+    # array cells) or 0.0 -- Preagonal/FourPlay/quattroplay/
+    # src/TScriptMachine.cpp:3207-3213. So a number and a plain string both
+    # read 0 and only the array reads 3.
+    assert objects.call("objType") == 3
 
 
 def test_global_var(objects):
@@ -446,7 +452,12 @@ def test_printf_format():
 def test_gs2_eq():
     assert gs2_eq(5.0, "5")
     assert gs2_eq("abc", "abc")
-    assert not gs2_eq("abc", "ABC")
+    # String/string comparison is strcasecmp in the official machine:
+    # TScriptMachine::compare() -> TString::compareIgnoreCase
+    # (Preagonal/FourPlay/quattroplay/src/TScriptMachine.cpp:1449 and
+    # src/TString.cpp:1001-1011). "abc" == "ABC" is TRUE there.
+    assert gs2_eq("abc", "ABC")
+    assert not gs2_eq("abc", "abd")
     assert gs2_eq([1.0, 2.0], [1.0, 2.0])
     assert not gs2_eq([1.0], [1.0, 2.0])
     o = GS2Object()
@@ -900,3 +911,222 @@ def test_starts_ends_are_case_insensitive():
     frame.stack.extend(["Login", "xyz"])
     vm._op_obj_starts(frame, None)
     assert frame.stack.pop() is False
+
+
+# ------------------------------------------------- official-interpreter parity
+#
+# The cases below were recovered from the reversed official interpreter that
+# now ships as readable C++ in Preagonal/FourPlay/quattroplay (executeScript
+# lives in src/TScriptMachine.cpp:2148-3686, with the matching x86 in
+# asm/TScriptMachine/_ZN14TScriptMachine13executeScriptEv.s_decomped).
+# Citations are file:line at FourPlay commit 4862ff00.
+
+
+def test_mod_is_floored_not_fmod():
+    # src/TScriptMachine.cpp:3091 -- `left - right * floor(left / right)`.
+    # C fmod would give -1.0 / 1.0 for the negative cases.
+    vm = GS2VM(GS2Container())
+    frame = _Frame(0, [])
+    for a, b, expected in [(7, 3, 1.0), (-7, 3, 2.0), (7, -3, -2.0),
+                           (-7, -3, -1.0), (7.5, 2, 1.5), (5, 0, 0.0)]:
+        frame.stack.extend([float(a), float(b)])
+        vm._op_mod(frame, None)
+        assert frame.stack.pop() == pytest.approx(expected), (a, b)
+
+
+def test_int_floors_with_the_index_epsilon():
+    # src/TScriptMachine.cpp:3221-3225 calls floorScriptIndex (:60-67), i.e.
+    # floor(v + 0.0001) -- not truncation toward zero.
+    vm = GS2VM(GS2Container())
+    frame = _Frame(0, [])
+    for v, expected in [(2.9, 2.0), (2.99999999, 3.0), (-2.5, -3.0),
+                        (-0.00005, 0.0), (3.0, 3.0)]:
+        frame.stack.append(v)
+        vm._op_int(frame, None)
+        assert frame.stack.pop() == expected, v
+
+
+def test_number_to_string_is_9_decimals_trimmed():
+    # switchTypeString: |(float)v| < 0.0001 prints the literal "0", anything
+    # else goes through TString::adddouble -> "%.9f" with trailing zeros and
+    # a trailing '.' stripped (asm/TScriptStackEntry/_ZN17TScriptStackEntry16
+    # switchTypeStringEP14TScriptMachineb.s_decomped:37-58, src/TString.cpp:
+    # 1139-1174). GS1 (gs1.values.fmt_num) prints the shortest round-tripping
+    # repr instead -- the two engines genuinely differ.
+    assert to_str(5.0) == "5"
+    assert to_str(2.5) == "2.5"
+    assert to_str(-2.5) == "-2.5"
+    assert to_str(2.0 / 3.0) == "0.666666667"
+    assert to_str(0.1) == "0.1"
+    assert to_str(0.00005) == "0"
+    assert to_str(-0.00005) == "0"
+    assert to_str(0.0) == "0"
+    assert to_str(1e20) == "100000000000000000000"
+    assert fmt_num(1.0000000004) == "1"
+
+
+def test_string_compare_is_case_insensitive_and_numeric_against_numbers():
+    # src/TScriptMachine.cpp:1430-1487 (compare()): string/string is
+    # strcasecmp, string/number is a numeric compare of strtofloat(string).
+    assert gs2_compare("abc", "ABC") == 0
+    assert gs2_compare("abc", "abd") < 0
+    assert gs2_compare("B", "a") > 0
+    assert gs2_compare("5", 5.0) == 0
+    assert gs2_compare("abc", 0.0) == 0      # strtofloat("abc") == 0
+    assert gs2_compare(3.0, "10") < 0        # numeric, not lexicographic
+
+
+def test_numeric_comparison_carries_the_0001_tolerance():
+    # compareNumberValues (src/TScriptMachine.cpp:36-43): a < b only when
+    # b > a + 0.0001, so near-equal floats compare EQUAL.
+    assert gs2_compare(0.99999, 1.0) == 0
+    assert gs2_compare(1.0, 1.00005) == 0
+    assert gs2_compare(1.0, 1.0002) < 0
+    vm = GS2VM(GS2Container())
+    frame = _Frame(0, [])
+    frame.stack.extend([0.99999, 1.0])
+    vm._op_lt(frame, None)
+    assert frame.stack.pop() is False
+    frame.stack.extend([0.99999, 1.0])
+    vm._op_gte(frame, None)
+    assert frame.stack.pop() is True
+
+
+def test_min_max_keep_the_winning_operands_type():
+    # src/TScriptMachine.cpp:3286-3295 copies the winning stack entry, so the
+    # result keeps its type; comparison is compare(), so strings work.
+    vm = GS2VM(GS2Container())
+    frame = _Frame(0, [])
+    frame.stack.extend(["b", "a"])
+    vm._op_min(frame, None)
+    assert frame.stack.pop() == "a"
+    frame.stack.extend(["b", "a"])
+    vm._op_max(frame, None)
+    assert frame.stack.pop() == "b"
+    frame.stack.extend([3.0, 9.0])
+    vm._op_min(frame, None)
+    assert frame.stack.pop() == 3.0
+
+
+def test_bitwise_ops_use_int32_semantics():
+    # src/TScriptMachine.cpp:3096-3111: both operands go through a C int32
+    # cast and shift counts are masked to 5 bits.
+    vm = GS2VM(GS2Container())
+    frame = _Frame(0, [])
+    frame.stack.extend([1.0, 33.0])
+    vm._op_bw_leftshift(frame, None)
+    assert frame.stack.pop() == 2.0          # 33 & 31 == 1, not 1 << 33
+    frame.stack.extend([1.0, 31.0])
+    vm._op_bw_leftshift(frame, None)
+    assert frame.stack.pop() == -2147483648.0  # wraps like int32
+    frame.stack.append(-2.5)
+    vm._op_bwi(frame, None)                  # ~floorScriptIndex(-2.5) == ~-3
+    assert frame.stack.pop() == 2.0
+
+
+def test_vecx_vecy_do_not_wrap_past_direction_3():
+    # src/TScriptMachine.cpp:3313-3325: dir > 3 reads 0, there is no % 4.
+    vm = GS2VM(GS2Container())
+    frame = _Frame(0, [])
+    for d, x, y in [(0, 0.0, -1.0), (1, -1.0, 0.0), (2, 0.0, 1.0),
+                    (3, 1.0, 0.0), (5, 0.0, 0.0)]:
+        frame.stack.append(float(d))
+        vm._op_vecx(frame, None)
+        assert frame.stack.pop() == x, d
+        frame.stack.append(float(d))
+        vm._op_vecy(frame, None)
+        assert frame.stack.pop() == y, d
+
+
+def test_sin_cos_are_not_snapped_to_zero():
+    # The official handlers are bare libm calls (src/TScriptMachine.cpp:
+    # 3248-3253); only GS2Engine's C# port snaps small results to 0.
+    vm = GS2VM(GS2Container())
+    frame = _Frame(0, [])
+    frame.stack.append(math.pi)
+    vm._op_sin(frame, None)
+    assert frame.stack.pop() == math.sin(math.pi) != 0.0
+
+
+def test_official_only_opcodes_66_67_104_121():
+    # Opcodes the open-source compiler never emits but the official
+    # interpreter implements: logical and/or (:3127-3151), 3-way compare
+    # (:3352-3358) and the runtime-typed `+` (:3452-3475).
+    vm = GS2VM(GS2Container())
+    frame = _Frame(0, [])
+    frame.stack.extend([2.0, 3.0])
+    vm._op_unknown_66(frame, None)
+    assert frame.stack.pop() == 1.0
+    frame.stack.extend([0.0, 3.0])
+    vm._op_unknown_66(frame, None)
+    assert frame.stack.pop() == 0.0
+    frame.stack.extend([0.0, 3.0])
+    vm._op_unknown_67(frame, None)
+    assert frame.stack.pop() == 1.0
+    frame.stack.extend(["abc", "abd"])
+    vm._op_obj_compare(frame, None)
+    assert frame.stack.pop() == -1.0
+    frame.stack.extend(["a", 5.0])
+    vm._op_dynamic_add(frame, None)
+    assert frame.stack.pop() == "a5"
+    frame.stack.extend([2.0, 5.0])
+    vm._op_dynamic_add(frame, None)
+    assert frame.stack.pop() == 7.0
+
+
+def test_getdir_ties_go_to_the_vertical_axis():
+    # TScriptMachine::getDir (src/TScriptMachine.cpp:1278-1304): the x branch
+    # needs a STRICTLY larger |x|, so a 45-degree vector reads as up/down.
+    vm = GS2VM(GS2Container())
+    frame = _Frame(0, [])
+    for dx, dy, expected in [(5.0, 1.0, 3.0), (-5.0, 1.0, 1.0),
+                             (1.0, 5.0, 2.0), (1.0, -5.0, 0.0),
+                             (1.0, 1.0, 2.0), (0.0, 0.0, 2.0)]:
+        frame.stack.extend([dx, dy])
+        vm._op_getdir(frame, None)
+        assert frame.stack.pop() == expected, (dx, dy)
+
+
+def test_in_range_is_inclusive_with_tolerance_and_walks_arrays():
+    # ValueInRange mode 0 (src/unsorted.cpp:1359-1376) -- the only mode the
+    # open-source compiler emits -- plus the all-cells array form
+    # (src/TScriptMachine.cpp:92-135).
+    vm = GS2VM(GS2Container())
+    frame = _Frame(0, [])
+    for v, lo, hi, expected in [(5.0, 0.0, 10.0, True), (0.0, 0.0, 10.0, True),
+                                (10.0, 0.0, 10.0, True), (10.00005, 0.0, 10.0, True),
+                                (10.001, 0.0, 10.0, False), (-1.0, 0.0, 10.0, False)]:
+        frame.stack.extend([v, lo, hi])
+        vm._op_in_range(frame, None)
+        assert frame.stack.pop() is expected, (v, lo, hi)
+
+    frame.stack.extend([[1.0, 2.0, 3.0], 0.0, 10.0])
+    vm._op_in_range(frame, None)
+    assert frame.stack.pop() is True
+    frame.stack.extend([[1.0, 99.0], 0.0, 10.0])
+    vm._op_in_range(frame, None)
+    assert frame.stack.pop() is False
+
+
+def test_in_range_modes_and_the_out_of_table_default():
+    """The four ValueInRange modes select which ends are exclusive, and a mode
+    outside 0..3 is `default: return false` (src/unsorted.cpp:1364-1375) --
+    NOT "behave like mode 0". No real bytecode we have carries the operand, so
+    this only matters if a stray one is ever attached, but silently widening a
+    range there would be exactly the kind of invisible branch flip we are
+    guarding against."""
+    from reborn_protocol.gs2.vm import _value_in_range
+
+    # mode 0: both ends inclusive; 1: hi exclusive; 2: lo exclusive; 3: both
+    assert _value_in_range(0.0, 0.0, 10.0, 0) is True
+    assert _value_in_range(10.0, 0.0, 10.0, 0) is True
+    assert _value_in_range(10.0, 0.0, 10.0, 1) is False
+    assert _value_in_range(0.0, 0.0, 10.0, 1) is True
+    assert _value_in_range(0.0, 0.0, 10.0, 2) is False
+    assert _value_in_range(10.0, 0.0, 10.0, 2) is True
+    assert _value_in_range(0.0, 0.0, 10.0, 3) is False
+    assert _value_in_range(10.0, 0.0, 10.0, 3) is False
+    assert _value_in_range(5.0, 0.0, 10.0, 3) is True
+    # out of table
+    assert _value_in_range(5.0, 0.0, 10.0, 4) is False
+    assert _value_in_range(5.0, 0.0, 10.0, -1) is False

@@ -14,13 +14,19 @@ memory for the build log; ground-truth sources for the bytecode format:
 from .opcodes import Op, op_name
 from .container import GS2Container, FunctionEntry, GS2ContainerError, parse_container
 from .disasm import Instruction, Operand, GS2DecodeError, decode, format_listing
-from .values import GS2Object, LValue, VarRef, to_num, to_str, to_bool, gs2_eq
-from .vm import GS2VM, GS2Host, NOT_HANDLED, printf_format
+from .values import (
+    GS2_NULL, GS2Object, LValue, VarRef, to_num, to_str, to_bool, gs2_eq,
+)
+from .vm import (
+    GS2VM, GS2Host, GS2ScriptFunction, NOT_HANDLED, array_index, printf_format,
+)
 
 __all__ = [
     "Op", "op_name",
     "GS2Container", "FunctionEntry", "GS2ContainerError", "parse_container",
     "Instruction", "Operand", "GS2DecodeError", "decode", "format_listing",
-    "GS2Object", "LValue", "VarRef", "to_num", "to_str", "to_bool", "gs2_eq",
-    "GS2VM", "GS2Host", "NOT_HANDLED", "printf_format",
+    "GS2_NULL", "GS2Object", "LValue", "VarRef", "to_num", "to_str",
+    "to_bool", "gs2_eq",
+    "GS2VM", "GS2Host", "GS2ScriptFunction", "NOT_HANDLED", "array_index",
+    "printf_format",
 ]

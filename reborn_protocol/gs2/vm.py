@@ -36,8 +36,8 @@ from .container import GS2Container, parse_container
 from .disasm import Instruction, decode
 from .opcodes import Op
 from .values import (
-    ARRAY_START, ElemRef, GS2Object, LValue, VarRef,
-    gs2_eq, to_bool, to_num, to_str, fmt_num,
+    ARRAY_START, GS2_NULL, ElemRef, GS2Object, LValue, VarRef, _f32,
+    gs2_compare, gs2_eq, to_bool, to_num, to_str, fmt_num,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,14 +47,105 @@ NOT_HANDLED = object()
 
 #: cap on any single array allocation/index-driven growth (arr[100000000]=1
 #: must not try to allocate a 100M-element list). Applied wherever a script
-#: index controls array size: OP_ARRAY_NEW(_MULTIDIM), OP_SETARRAY,
-#: OP_ARRAY_ASSIGN, OP_OBJ_REPLACESTRING.
+#: index controls array size: OP_ARRAY_ASSIGN, OP_OBJ_REPLACESTRING.
 MAX_ARRAY_INDEX = 1 << 20
 
+#: the official machine's own array-ALLOCATION cap. initArray (OP_ARRAY_NEW),
+#: setArray (OP_SETARRAY) and expandArray (OP_ARRAY_NEW_MULTIDIM) all clamp
+#: the requested size into [0, 10000] before allocating -- FourPlay's
+#: decompiled interpreter, Preagonal/FourPlay/quattroplay/src/
+#: TScriptMachine.cpp:1409-1410 (initArray), :1656-1659 (expandArray) and
+#: the same idiom in setArray (:1400). `new[50000]` therefore yields 10000
+#: elements on the real client, not 50000.
+MAX_ARRAY_SIZE = 0x2710
+
+#: the epsilon the official machine folds into every stack-double ->
+#: array-index conversion, DOUBLE_00402440 = 0.0001 (value from
+#: Preagonal/FourPlay/quattroplay/src/TInitStatics.cpp:1266). It is the same
+#: constant as values.SCRIPT_EPSILON -- one machine-wide tolerance.
+ARRAY_INDEX_EPSILON = 1e-4
+
 #: register-file bound for OP_REG_STORE/OP_REG_LOAD -- the official
-#: interpreter bounds the index at 0x3FF (quattroplay executeScript
-#: caseD_2d/caseD_2e both compare against $0x3ff before touching the file).
+#: interpreter rejects indices >= 0x400 (getCallStackRegister,
+#: src/TScriptMachine.cpp:2160-2169; the registers live on the CALL-STACK
+#: entry, which is why ours are per-frame).
 MAX_REGISTER_INDEX = 0x3FF
+
+
+def array_index(value: Any) -> int:
+    """Official double -> integer index conversion.
+
+    Every index-taking machine method converts the stack double with the
+    same three-instruction idiom: add DOUBLE_00402440 (0.0001), truncate
+    toward zero, then subtract 1 if the source was negative and the
+    truncation was not exact -- i.e. ``floor(v + 0.0001)``, NOT Python's
+    ``int()`` truncation. It is a named helper in the decompiled
+    interpreter -- floorScriptIndex, src/TScriptMachine.cpp:60-67 -- used by
+    getArrayCell/getArrayCell2/setArrayCell/setArrayCell2, initArray,
+    setArray, expandArray, arrayDelete, arrayInsert, arrayReplace, charAt,
+    subString, foreach's index, OP_INT, OP_BWI and vecx/vecy.
+
+    The epsilon matters: a script index computed as ``(a/b)*c`` that lands
+    on 2.99999999996 indexes cell 3 on the real client and cell 2 under
+    plain truncation. (OP_OBJ_SUBARRAY is the one index-taking op that does
+    NOT use it -- subArray reads its bounds through a different helper.)
+    """
+    try:
+        return math.floor(to_num(value) + ARRAY_INDEX_EPSILON)
+    except (ValueError, OverflowError):  # NaN / inf
+        return 0
+
+
+def array_size(value: Any) -> int:
+    """Official allocation-size conversion: array_index() clamped into
+    [0, MAX_ARRAY_SIZE] exactly as initArray/setArray/expandArray do."""
+    return max(0, min(array_index(value), MAX_ARRAY_SIZE))
+
+
+def to_int32(value: Any) -> int:
+    """C `static_cast<int32_t>(double)`: truncate toward zero, and yield
+    INT_MIN when the value does not fit (what cvttsd2si does on x86-64, and
+    what every bitwise opcode in the official machine relies on --
+    src/TScriptMachine.cpp:3096-3111 casts both operands that way)."""
+    try:
+        n = math.trunc(to_num(value))
+    except (ValueError, OverflowError):  # NaN / inf
+        return -0x80000000
+    if not -0x80000000 <= n < 0x80000000:
+        return -0x80000000
+    return n
+
+
+def _denull(value: Any) -> Any:
+    """Collapse the GS2_NULL sentinel back to None.
+
+    GS2_NULL exists so `x == null` can take the OBJECT/OBJECT row of
+    gs2_compare instead of the NUMBER row (values._GS2Null). It is an
+    expression-stack value only: the instant it would be stored in a variable
+    or handed to a host builtin it becomes plain None, so pyReborn's host
+    surface -- which tests `arg is None` all over -- never has to learn about
+    it. The two are interchangeable everywhere else (both are falsy, both
+    to_num to 0.0, both to_str to "")."""
+    return None if value is GS2_NULL else value
+
+
+def _value_in_range(value: float, lo: float, hi: float, mode: int) -> bool:
+    """ValueInRange (Preagonal/FourPlay/quattroplay/src/unsorted.cpp:
+    1359-1376): each end is inclusive or exclusive per the mode bits, and
+    both carry the 0.0001 tolerance. A mode outside 0..3 is `return false`,
+    not "behave like mode 0"."""
+    if not 0 <= mode <= 3:
+        return False
+    eps = ARRAY_INDEX_EPSILON
+    lo_ok = value - lo > (eps if mode in (2, 3) else -eps)
+    hi_ok = (-eps if mode in (1, 3) else eps) > value - hi
+    return lo_ok and hi_ok
+
+
+def _wrap_int32(n: int) -> int:
+    """Two's-complement wrap of a signed-32-bit shift result."""
+    n &= 0xFFFFFFFF
+    return n - 0x100000000 if n >= 0x80000000 else n
 
 
 class GS2Host:
@@ -83,6 +174,66 @@ class GS2Host:
         """Storage for unqualified variable writes. Hosts may share one dict
         across scripts (Reborn client globals are shared)."""
         raise NotImplementedError
+
+
+class GS2ScriptFunction:
+    """A callable bound to one of a script's own functions.
+
+    This is what a member read of ``this.<script function name>`` evaluates
+    to (see _ScriptFnRef). It is the value `onAction = function(){...}` puts
+    in the control's onAction slot, so a host can simply call whatever it
+    finds there -- no VM introspection, no "which VM was running last"
+    guesswork. Calling it runs the function synchronously through
+    GS2VM.call(), which never raises.
+    """
+
+    __slots__ = ("vm", "name")
+
+    def __init__(self, vm: "GS2VM", name: str):
+        self.vm = vm
+        self.name = name
+
+    def __call__(self, *args: Any) -> Any:
+        return self.vm.call(self.name, *args)
+
+    def __repr__(self) -> str:
+        return f"<GS2ScriptFunction {self.vm.name}.{self.name}>"
+
+
+class _ScriptFnRef(LValue):
+    """Member slot on a this-object whose name is also one of the script's
+    own functions, and which holds no stored value.
+
+    `onAction = function(){...};` compiles to a *read* of
+    `this.<generated-name>`: the compiler declares the lambda body as a
+    public script function and then emits
+    `OP_THIS; OP_TYPE_VAR <name>; OP_MEMBER_ACCESS; OP_CONV_TO_OBJECT`
+    (GS2CompilerVisitor.cpp:970-994, name from
+    ParserContext::generateLambdaFuncName, Parser.cpp:133 -> "function_1NN_1";
+    ExpressionFnObject's ctor marks the decl public, ast.h:855). The same
+    shape backs the plain `x = function(){...}; x();` lambda idiom.
+
+    Reading that member off a bare GS2Object yields None, so the assignment
+    stores nothing and the handler never fires. Resolving it here -- at the
+    read, in the VM -- keeps it working under the official with-block `this`
+    rebinding too (inside `new GuiButton("b") {...}` OP_THIS is the control
+    under construction, not the script's this-object).
+
+    A stored value always wins: this only fills a hole, so a script that
+    later assigns a real value to the same member reads that value back.
+    """
+
+    __slots__ = ("_vm",)
+
+    def __init__(self, vm: "GS2VM", obj: Any, key: str):
+        super().__init__(obj, key)
+        self._vm = vm
+
+    def get(self) -> Any:
+        value = super().get()
+        if value is None:
+            return self._vm.script_function(self.key)
+        return value
 
 
 class _NameVivifyRef(LValue):
@@ -243,6 +394,44 @@ class GS2VM:
         return name.lower() in self.functions or any(
             j.has_function(name) for j in self.joined)
 
+    @property
+    def this(self) -> Any:
+        return self._this
+
+    @this.setter
+    def this(self, value: Any) -> None:
+        """Assigning a this-object registers this VM as one of its owners.
+
+        Hosts routinely swap the object in after construction (pyReborn's
+        ClientGS2 gives NPC scripts an npc-dict-bridging `this`, reuses the
+        previous VM's on a re-send, and shares the joiner's with a joined
+        class instance), so the back-reference cross-script calls resolve
+        through has to be maintained here rather than once in __init__.
+        """
+        self._this = value
+        owners = getattr(value, "script_vms", None)
+        if owners is not None and self not in owners:
+            owners.append(self)
+
+    def has_public_function(self, name: str) -> bool:
+        """True if `name` is declared `public function` here (or in a joined
+        class). `public` is exactly the engine's cross-script call surface:
+        one script reaches another's function through an object reference,
+        and only public ones are visible that way."""
+        return name.lower() in self.public_functions or any(
+            j.has_public_function(name) for j in self.joined)
+
+    def script_function(self, name: str) -> Optional[GS2ScriptFunction]:
+        """The script's own function `name` as a plain Python callable, or
+        None if this script (or any class it joined) does not declare it.
+
+        Public surface for hosts: the value a script stores by assigning an
+        anonymous `function(){...}` is exactly one of these, so a host that
+        finds a callable in an event slot can just call it."""
+        if self.has_function(name):
+            return GS2ScriptFunction(self, name.lower())
+        return None
+
     def call(self, name: str, *args: Any) -> Any:
         """Invoke a script function by name (event entry point). Returns the
         script's return value, or None if the function does not exist.
@@ -260,7 +449,9 @@ class GS2VM:
                 try:
                     next(gen)
                 except StopIteration as done:
-                    return done.value
+                    # `return null;` must reach the host as None, not the
+                    # expression-stack sentinel -- see _denull.
+                    return _denull(done.value)
         except Exception as e:  # absolute backstop; _execute already guards
             self._log_once(("call", self.name, key, type(e).__name__),
                            "GS2 %s.%s aborted: %s", self.name, name, e)
@@ -478,6 +669,7 @@ class GS2VM:
         self.globals[key] = value
 
     def _write_ref(self, target: Any, value: Any, frame: "_Frame") -> None:
+        value = _denull(value)
         if isinstance(target, LValue):
             target.set(value)
         elif isinstance(target, VarRef):
@@ -494,9 +686,9 @@ class GS2VM:
         while stack:
             v = stack.pop()
             if v is ARRAY_START:
-                return args
+                return [_denull(a) for a in args]
             args.append(v)
-        return args
+        return [_denull(a) for a in args]
 
     def _log_once(self, key: Tuple, msg: str, *fmt: Any) -> None:
         if key not in type(self)._logged_once:
@@ -598,7 +790,11 @@ class GS2VM:
         frame.stack.append(False)
 
     def _op_type_null(self, frame, instr):
-        frame.stack.append(None)
+        # The `null` keyword is an OBJECT entry with a nullptr pointer, not an
+        # unset variable (TScriptMachine.cpp:2605-2609) -- see values._GS2Null.
+        # It is normalised back to None the moment it leaves the expression
+        # stack (_denull), so nothing outside the VM ever sees the sentinel.
+        frame.stack.append(GS2_NULL)
 
     def _op_pi(self, frame, instr):
         frame.stack.append(math.pi)
@@ -733,13 +929,34 @@ class GS2VM:
         else:
             frame.stack.append(raw)
 
+    def _is_script_fn_slot(self, base: GS2Object, name: str,
+                           frame: "_Frame") -> bool:
+        """Should `base.name` fall back to the script's own function table?
+
+        Only for reads off the CURRENT this-object (plain `this`, thiso, or
+        the with-rebound this OP_THIS would push right now) whose member is
+        unset -- that is precisely the shape the compiler emits for an
+        anonymous `function(){...}`. Restricting it to this-objects keeps a
+        miss on some unrelated host object (`player.onwall`) reading None as
+        before. has() is only the cheap gate; _ScriptFnRef.get() re-checks
+        the real stored value, so a host object with a computed member it
+        does not report through has() still wins.
+        """
+        if base.has(name) or not self.has_function(name):
+            return False
+        if base is self.this or base is self.thiso:
+            return True
+        return bool(frame.with_stack) and base is self._current_this(frame)
+
     def _op_member_access(self, frame, instr):
         namev = frame.stack.pop() if frame.stack else None
         base_entry = frame.stack.pop() if frame.stack else None
         name = namev.name if isinstance(namev, VarRef) else to_str(self.deref(namev, frame))
         base = (self.deref(base_entry, frame)
                 if isinstance(base_entry, (VarRef, LValue)) else base_entry)
-        if isinstance(base, (GS2Object, list)):
+        if isinstance(base, GS2Object) and self._is_script_fn_slot(base, name, frame):
+            frame.stack.append(_ScriptFnRef(self, base, name))
+        elif isinstance(base, (GS2Object, list)):
             # lists ride along so array method calls can dispatch (LValue
             # reads/writes on a list base are still dead -- see values.py)
             frame.stack.append(LValue(base, name))
@@ -761,12 +978,11 @@ class GS2VM:
         frame.stack.append(vals)
 
     def _op_array_new(self, frame, instr):
-        size = int(to_num(self.deref(frame.stack.pop(), frame))) if frame.stack else 0
-        frame.stack.append([0.0] * max(0, min(size, MAX_ARRAY_INDEX)))
+        size = array_size(self.deref(frame.stack.pop(), frame)) if frame.stack else 0
+        frame.stack.append([0.0] * size)
 
     def _op_array_new_multidim(self, frame, instr):
-        size = int(to_num(self.deref(frame.stack.pop(), frame))) if frame.stack else 0
-        size = max(0, min(size, MAX_ARRAY_INDEX))
+        size = array_size(self.deref(frame.stack.pop(), frame)) if frame.stack else 0
         arr = self.deref(frame.stack[-1], frame) if frame.stack else None
         if isinstance(arr, list):
             for i, v in enumerate(arr):
@@ -785,9 +1001,8 @@ class GS2VM:
                 arr[i] = [0.0] * size
 
     def _op_setarray(self, frame, instr):
-        size = int(to_num(self.deref(frame.stack.pop(), frame))) if frame.stack else 0
+        size = array_size(self.deref(frame.stack.pop(), frame)) if frame.stack else 0
         target = frame.stack.pop() if frame.stack else None
-        size = max(0, min(size, MAX_ARRAY_INDEX))
         cur = self.deref(target, frame)
         arr = list(cur) if isinstance(cur, list) else []
         if len(arr) < size:
@@ -885,8 +1100,11 @@ class GS2VM:
         frame.stack.append(a / b if b != 0 else 0.0)
 
     def _op_mod(self, frame, instr):
+        # FLOORED modulo (`left - right * floor(left / right)`), not C fmod:
+        # src/TScriptMachine.cpp:3091 (and the same expression in the fused
+        # immediate helper, :2195). -7 % 3 is 2 on the real client, not -1.
         a, b = self._pop2num(frame)
-        frame.stack.append(math.fmod(a, b) if b != 0 else 0.0)
+        frame.stack.append(a - b * math.floor(a / b) if b != 0 else 0.0)
 
     def _op_pow(self, frame, instr):
         a, b = self._pop2num(frame)
@@ -894,6 +1112,29 @@ class GS2VM:
             frame.stack.append(float(a ** b))
         except (ValueError, OverflowError, ZeroDivisionError):
             frame.stack.append(0.0)
+
+    # 66/67: non-short-circuiting logical AND/OR (src/TScriptMachine.cpp:
+    # 3127-3151). The open-source compiler never emits them -- `&&`/`||`
+    # always compile to the OP_AND/OP_OR jump pair -- but the official
+    # interpreter handles them, so decode-and-skip would corrupt the stack.
+
+    def _op_unknown_66(self, frame, instr):
+        a, b = self._pop2num(frame)
+        frame.stack.append(1.0 if (a != 0.0 and b != 0.0) else 0.0)
+
+    def _op_unknown_67(self, frame, instr):
+        a, b = self._pop2num(frame)
+        frame.stack.append(1.0 if (a != 0.0 or b != 0.0) else 0.0)
+
+    def _op_dynamic_add(self, frame, instr):
+        # Runtime-typed `+` (src/TScriptMachine.cpp:3452-3475): string concat
+        # if EITHER operand is a string, numeric add otherwise. Also absent
+        # from gs2parser's opcode table.
+        a, b = self._pop2(frame)
+        if isinstance(a, str) or isinstance(b, str):
+            frame.stack.append(to_str(a) + to_str(b))
+        else:
+            frame.stack.append(to_num(a) + to_num(b))
 
     def _op_not(self, frame, instr):
         v = self.deref(frame.stack.pop(), frame) if frame.stack else None
@@ -903,61 +1144,92 @@ class GS2VM:
         v = self.deref(frame.stack.pop(), frame) if frame.stack else None
         frame.stack.append(-to_num(v))
 
-    def _op_eq(self, frame, instr):
+    # OP_EQ..OP_GTE all funnel through the one 3-way TScriptMachine::compare()
+    # (src/TScriptMachine.cpp:3164-3190), so they inherit its string
+    # comparison and 1e-4 numeric tolerance -- see values.gs2_compare.
+
+    def _pop2(self, frame) -> Tuple[Any, Any]:
         b = self.deref(frame.stack.pop(), frame) if frame.stack else None
         a = self.deref(frame.stack.pop(), frame) if frame.stack else None
-        frame.stack.append(gs2_eq(a, b))
+        return a, b
+
+    def _op_eq(self, frame, instr):
+        a, b = self._pop2(frame)
+        frame.stack.append(gs2_compare(a, b) == 0)
 
     def _op_neq(self, frame, instr):
-        b = self.deref(frame.stack.pop(), frame) if frame.stack else None
-        a = self.deref(frame.stack.pop(), frame) if frame.stack else None
-        frame.stack.append(not gs2_eq(a, b))
+        a, b = self._pop2(frame)
+        frame.stack.append(gs2_compare(a, b) != 0)
 
     def _op_lt(self, frame, instr):
-        a, b = self._pop2num(frame)
-        frame.stack.append(a < b)
+        a, b = self._pop2(frame)
+        frame.stack.append(gs2_compare(a, b) < 0)
 
     def _op_gt(self, frame, instr):
-        a, b = self._pop2num(frame)
-        frame.stack.append(a > b)
+        a, b = self._pop2(frame)
+        frame.stack.append(gs2_compare(a, b) > 0)
 
     def _op_lte(self, frame, instr):
-        a, b = self._pop2num(frame)
-        frame.stack.append(a <= b)
+        a, b = self._pop2(frame)
+        frame.stack.append(gs2_compare(a, b) <= 0)
 
     def _op_gte(self, frame, instr):
-        a, b = self._pop2num(frame)
-        frame.stack.append(a >= b)
+        a, b = self._pop2(frame)
+        frame.stack.append(gs2_compare(a, b) >= 0)
+
+    def _op_obj_compare(self, frame, instr):
+        # 3-way compare pushed as a number (src/TScriptMachine.cpp:3352-3358).
+        # Never emitted by the open-source compiler; the official one does.
+        a, b = self._pop2(frame)
+        frame.stack.append(float(gs2_compare(a, b)))
+
+    # Bitwise ops convert with a C int32 cast, so they wrap/saturate where
+    # Python's unbounded ints would not (src/TScriptMachine.cpp:3096-3111).
 
     def _op_bwo(self, frame, instr):
-        a, b = self._pop2num(frame)
-        frame.stack.append(float(int(a) | int(b)))
+        a, b = self._pop2(frame)
+        frame.stack.append(float(to_int32(a) | to_int32(b)))
 
     def _op_bwa(self, frame, instr):
-        a, b = self._pop2num(frame)
-        frame.stack.append(float(int(a) & int(b)))
+        a, b = self._pop2(frame)
+        frame.stack.append(float(to_int32(a) & to_int32(b)))
 
     def _op_bwx(self, frame, instr):
-        a, b = self._pop2num(frame)
-        frame.stack.append(float(int(a) ^ int(b)))
+        a, b = self._pop2(frame)
+        frame.stack.append(float(to_int32(a) ^ to_int32(b)))
 
     def _op_bwi(self, frame, instr):
-        v = to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
-        frame.stack.append(float(~int(v)))
+        # NB: OP_BWI is the one bitwise op that rounds with the index epsilon
+        # instead of truncating (`~floorScriptIndex(v)`, :3121-3124).
+        v = self.deref(frame.stack.pop(), frame) if frame.stack else 0.0
+        frame.stack.append(float(~array_index(v)))
 
     def _op_bw_leftshift(self, frame, instr):
-        a, b = self._pop2num(frame)
-        frame.stack.append(float(int(a) << max(0, min(int(b), 63))))
+        # shift count masked to 5 bits and the result is an int32 (:3108-3111)
+        a, b = self._pop2(frame)
+        frame.stack.append(float(_wrap_int32(to_int32(a) << (to_int32(b) & 31))))
 
     def _op_bw_rightshift(self, frame, instr):
-        a, b = self._pop2num(frame)
-        frame.stack.append(float(int(a) >> max(0, min(int(b), 63))))
+        a, b = self._pop2(frame)
+        frame.stack.append(float(to_int32(a) >> (to_int32(b) & 31)))
 
     def _op_in_range(self, frame, instr):
+        # `v in |lo,hi|`. The opcode carries a *mode* operand selecting which
+        # ends are inclusive (ValueInRange, src/unsorted.cpp:1359-1376); the
+        # open-source compiler only ever emits mode 0 (both ends inclusive,
+        # each with the 1e-4 tolerance), and leaves the operand off entirely.
+        # An array-valued left operand tests EVERY cell
+        # (TScriptMachine::inRange, src/TScriptMachine.cpp:92-135).
         hi = to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
         lo = to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
-        v = to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
-        frame.stack.append(lo <= v <= hi)
+        v = self.deref(frame.stack.pop(), frame) if frame.stack else 0.0
+        mode = int(instr.operand.value) if instr is not None and instr.operand else 0
+        if isinstance(v, list) and v:
+            ok = all(_value_in_range(to_num(x), lo, hi, mode) for x in v)
+        else:
+            # empty array / scalar: converted with switchTypeFloat first
+            ok = _value_in_range(to_num(v), lo, hi, mode)
+        frame.stack.append(ok)
 
     def _op_in_obj(self, frame, instr):
         obj = self.deref(frame.stack.pop(), frame) if frame.stack else None
@@ -974,8 +1246,11 @@ class GS2VM:
     # --- math builtin opcodes ---
 
     def _op_int(self, frame, instr):
-        v = to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
-        frame.stack.append(float(math.trunc(v)))
+        # int() is floorScriptIndex(), i.e. floor(v + 0.0001) -- NOT
+        # truncation (src/TScriptMachine.cpp:3221-3225 with the helper at :60-67).
+        # int(-2.5) is -3 on the real client, and int(2.99999) is 3.
+        v = self.deref(frame.stack.pop(), frame) if frame.stack else 0.0
+        frame.stack.append(float(array_index(v)))
 
     def _op_abs(self, frame, instr):
         v = to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
@@ -986,15 +1261,19 @@ class GS2VM:
         lo, hi = min(a, b), max(a, b)
         frame.stack.append(lo + _random.random() * (hi - lo))
 
+    # sin/cos/arctan are raw libm calls in the official machine -- no
+    # snap-to-zero (src/TScriptMachine.cpp:3248-3261, and the asm dispatch
+    # caseD_58 calls sin@plt straight through). GS2Engine's ScriptMachine.cs
+    # snaps |r| < 1e-6 to 0; that is its own invention, so it loses here.
+    # Values that small print as "0" anyway (values.fmt_num).
+
     def _op_sin(self, frame, instr):
         v = to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
-        r = math.sin(v)
-        frame.stack.append(0.0 if abs(r) < 1e-6 else r)
+        frame.stack.append(math.sin(v))
 
     def _op_cos(self, frame, instr):
         v = to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
-        r = math.cos(v)
-        frame.stack.append(0.0 if abs(r) < 1e-6 else r)
+        frame.stack.append(math.cos(v))
 
     def _op_arctan(self, frame, instr):
         v = to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
@@ -1015,33 +1294,48 @@ class GS2VM:
         except (ValueError, ZeroDivisionError):
             frame.stack.append(0.0)
 
+    # min/max go through compare() too and keep the winning operand's TYPE
+    # (src/TScriptMachine.cpp:3286-3295), so min("b","a") is the string "a".
+
     def _op_min(self, frame, instr):
-        a, b = self._pop2num(frame)
-        frame.stack.append(min(a, b))
+        a, b = self._pop2(frame)
+        frame.stack.append(b if gs2_compare(a, b) > 0 else a)
 
     def _op_max(self, frame, instr):
-        a, b = self._pop2num(frame)
-        frame.stack.append(max(a, b))
+        a, b = self._pop2(frame)
+        frame.stack.append(b if gs2_compare(a, b) < 0 else a)
 
     def _op_getangle(self, frame, instr):
+        # src/unsorted.cpp:1298-1309. atan2 agrees everywhere except x == 0,
+        # where the official code hardcodes 3*pi/2 for y > 0 and pi/2
+        # otherwise (so getangle(0,0) is pi/2, not 0).
         dx, dy = self._pop2num(frame)
+        if dx == 0.0:
+            frame.stack.append(4.7123889803846899 if dy > 0.0 else math.pi / 2)
+            return
         frame.stack.append(math.atan2(-dy, dx) % (2 * math.pi))
 
     def _op_getdir(self, frame, instr):
+        # TScriptMachine::getDir (src/TScriptMachine.cpp:1278-1304): dominant
+        # axis wins, and a TIE goes to the vertical axis (getdir(1,1) is 2,
+        # not 3). Magnitudes are compared as floats, not doubles.
         dx, dy = self._pop2num(frame)
-        # dominant axis -> direction (0 up, 1 left, 2 down, 3 right)
-        if abs(dx) >= abs(dy):
-            frame.stack.append(3.0 if dx > 0 else (1.0 if dx < 0 else 2.0))
+        if abs(_f32(dx)) > abs(_f32(dy)):
+            frame.stack.append(3.0 if dx >= 0.0 else 1.0)
         else:
-            frame.stack.append(2.0 if dy > 0 else 0.0)
+            frame.stack.append(2.0 if dy >= 0.0 else 0.0)
+
+    # vecx/vecy index TInput::movevec[dir*2 (+1)] after floorScriptIndex, and
+    # return 0 for dir > 3 -- there is NO wrap-around (src/TScriptMachine.cpp:
+    # 3313-3325), so vecx(5) is 0, not vecx(1).
 
     def _op_vecx(self, frame, instr):
-        d = int(to_num(self.deref(frame.stack.pop(), frame))) if frame.stack else 0
-        frame.stack.append({1: -1.0, 3: 1.0}.get(d % 4, 0.0))
+        d = array_index(self.deref(frame.stack.pop(), frame)) if frame.stack else 0
+        frame.stack.append(0.0 if d > 3 else {1: -1.0, 3: 1.0}.get(d, 0.0))
 
     def _op_vecy(self, frame, instr):
-        d = int(to_num(self.deref(frame.stack.pop(), frame))) if frame.stack else 0
-        frame.stack.append({0: -1.0, 2: 1.0}.get(d % 4, 0.0))
+        d = array_index(self.deref(frame.stack.pop(), frame)) if frame.stack else 0
+        frame.stack.append(0.0 if d > 3 else {0: -1.0, 2: 1.0}.get(d, 0.0))
 
     def _op_char(self, frame, instr):
         v = to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
@@ -1081,13 +1375,16 @@ class GS2VM:
         frame.stack.append(a + b)
 
     def _op_obj_charat(self, frame, instr):
-        idx = int(to_num(self.deref(frame.stack.pop(), frame))) if frame.stack else 0
+        idx = array_index(self.deref(frame.stack.pop(), frame)) if frame.stack else 0
         s = to_str(self.deref(frame.stack.pop(), frame)) if frame.stack else ""
         frame.stack.append(s[idx] if 0 <= idx < len(s) else "")
 
     def _op_obj_substr(self, frame, instr):
-        length = int(to_num(self.deref(frame.stack.pop(), frame))) if frame.stack else 0
-        start = int(to_num(self.deref(frame.stack.pop(), frame))) if frame.stack else 0
+        # subString converts BOTH bounds with the index epsilon
+        # and clamps start at 0 (TScriptMachine::subString,
+        # src/TScriptMachine.cpp:1194-1243).
+        length = array_index(self.deref(frame.stack.pop(), frame)) if frame.stack else 0
+        start = array_index(self.deref(frame.stack.pop(), frame)) if frame.stack else 0
         s = to_str(self.deref(frame.stack.pop(), frame)) if frame.stack else ""
         start = max(0, start)
         frame.stack.append(s[start:] if length < 0 else s[start:start + length])
@@ -1142,7 +1439,7 @@ class GS2VM:
         idx = self.deref(frame.stack.pop(), frame) if frame.stack else 0
         arr = self.deref(frame.stack.pop(), frame) if frame.stack else None
         if isinstance(arr, list):
-            i = int(to_num(idx))
+            i = array_index(idx)
             # Push a REFERENCE, not a value copy: GS2Engine's array access
             # yields a variable slot, so `this.data[1]++` / `arr[i] += x`
             # must write back into the list. ElemRef subclasses LValue, so
@@ -1167,7 +1464,7 @@ class GS2VM:
         target = frame.stack.pop() if frame.stack else None
         arr = self.deref(target, frame)
         if isinstance(arr, list):
-            i = int(to_num(idx))
+            i = array_index(idx)
             if 0 <= i <= MAX_ARRAY_INDEX:
                 if i >= len(arr):
                     arr.extend([0.0] * (i + 1 - len(arr)))
@@ -1177,26 +1474,38 @@ class GS2VM:
         elif arr is None and isinstance(target, (LValue, VarRef)):
             # auto-vivify: this.arr[0] = x on an unset member
             new = []
-            i = int(to_num(idx))
+            i = array_index(idx)
             if 0 <= i <= MAX_ARRAY_INDEX:
                 new.extend([0.0] * (i + 1))
                 new[i] = value
             self._write_ref(target, new, frame)
 
     def _op_array_multidim(self, frame, instr):
-        # a[i][j] read -- indices beyond the first are chained OP_ARRAY-like;
-        # the compiler pushes all indices then this op. We support 2D (the
-        # overwhelmingly common case).
-        j = int(to_num(self.deref(frame.stack.pop(), frame))) if frame.stack else 0
-        i = int(to_num(self.deref(frame.stack.pop(), frame))) if frame.stack else 0
+        # `a[i, j]` read. STRICTLY two-dimensional, and deliberately so: the
+        # compiler emits ONE OP_ARRAY_MULTIDIM for an index list of any
+        # length > 1 (GS2CompilerVisitor.cpp:663-669 with ast.h:277), but the
+        # official machine's handler getArrayCell2 pops exactly two indices
+        # and one base -- TScriptMachine::getArrayCell2,
+        # src/TScriptMachine.cpp:1930-1973, walks the stack link exactly
+        # twice and drops 2 entries before handing the pair to a
+        # two-int array getter. For `a[i, j, k]` that makes `i` the base (so the read
+        # yields nothing) and leaves `a` on the stack -- the real client
+        # mis-executes a 3-index read the same way, so matching it beats
+        # "fixing" it.
+        j = array_index(self.deref(frame.stack.pop(), frame)) if frame.stack else 0
+        i = array_index(self.deref(frame.stack.pop(), frame)) if frame.stack else 0
         arr = self.deref(frame.stack.pop(), frame) if frame.stack else None
         row = arr[i] if isinstance(arr, list) and 0 <= i < len(arr) else None
         frame.stack.append(row[j] if isinstance(row, list) and 0 <= j < len(row) else None)
 
     def _op_array_multidim_assign(self, frame, instr):
+        # `a[i, j] = v`; stack [obj, i, j, value] -- setArrayCell2 skips the
+        # value entry, converts the next two as indices and takes the fourth
+        # as the base (src/TScriptMachine.cpp:2040-2117). Two dimensions
+        # only, like the reader.
         value = self.deref(frame.stack.pop(), frame) if frame.stack else None
-        j = int(to_num(self.deref(frame.stack.pop(), frame))) if frame.stack else 0
-        i = int(to_num(self.deref(frame.stack.pop(), frame))) if frame.stack else 0
+        j = array_index(self.deref(frame.stack.pop(), frame)) if frame.stack else 0
+        i = array_index(self.deref(frame.stack.pop(), frame)) if frame.stack else 0
         arr = self.deref(frame.stack.pop(), frame) if frame.stack else None
         if isinstance(arr, list) and 0 <= i < len(arr) and isinstance(arr[i], list):
             row = arr[i]
@@ -1207,7 +1516,10 @@ class GS2VM:
 
     def _op_obj_subarray(self, frame, instr):
         # obj.subarray(start, length): default flags (no OBJECT_FIRST) put
-        # the object on top: stack is [length, start, obj]
+        # the object on top: stack is [length, start, obj].
+        # NB plain truncation, not array_index(): subArray is the one
+        # index-taking machine method that does NOT fold in the 0.0001
+        # epsilon (_ZN14TScriptMachine8subArrayEv.s has no DOUBLE_00402440).
         arr = self.deref(frame.stack.pop(), frame) if frame.stack else None
         start = int(to_num(self.deref(frame.stack.pop(), frame))) if frame.stack else 0
         length = int(to_num(self.deref(frame.stack.pop(), frame))) if frame.stack else -1
@@ -1227,7 +1539,7 @@ class GS2VM:
             self._write_ref(target, [value], frame)
 
     def _op_obj_deletestring(self, frame, instr):
-        idx = int(to_num(self.deref(frame.stack.pop(), frame))) if frame.stack else 0
+        idx = array_index(self.deref(frame.stack.pop(), frame)) if frame.stack else 0
         arr = self.deref(frame.stack.pop(), frame) if frame.stack else None
         if isinstance(arr, list) and 0 <= idx < len(arr):
             del arr[idx]
@@ -1243,7 +1555,7 @@ class GS2VM:
 
     def _op_obj_replacestring(self, frame, instr):
         # obj.replace(index, value) with CMD_REVERSE_ARGS: stack [obj, value, index]
-        idx = int(to_num(self.deref(frame.stack.pop(), frame))) if frame.stack else 0
+        idx = array_index(self.deref(frame.stack.pop(), frame)) if frame.stack else 0
         value = self.deref(frame.stack.pop(), frame) if frame.stack else None
         arr = self.deref(frame.stack.pop(), frame) if frame.stack else None
         if isinstance(arr, list) and 0 <= idx <= MAX_ARRAY_INDEX:
@@ -1253,7 +1565,7 @@ class GS2VM:
 
     def _op_obj_insertstring(self, frame, instr):
         # obj.insert(index, value) with CMD_REVERSE_ARGS: stack [obj, value, index]
-        idx = int(to_num(self.deref(frame.stack.pop(), frame))) if frame.stack else 0
+        idx = array_index(self.deref(frame.stack.pop(), frame)) if frame.stack else 0
         value = self.deref(frame.stack.pop(), frame) if frame.stack else None
         arr = self.deref(frame.stack.pop(), frame) if frame.stack else None
         if isinstance(arr, list) and idx >= 0:
@@ -1287,16 +1599,15 @@ class GS2VM:
             frame.stack.append([])
 
     def _op_obj_type(self, frame, instr):
-        # float 0, string 1, object 2, array 3 (opcodes.h comment)
+        # `x.type()` is NOT the 0/1/2/3 type tag opcodes.h guesses at. The
+        # official handler pushes 3.0 when the (already OP_CONV_TO_OBJECT'd)
+        # entry holds an object with array cells and 0.0 for everything else
+        # -- numbers, plain strings and member-only objects all read 0
+        # (src/TScriptMachine.cpp:3207-3213, constant DOUBLE_00402540 = 3.0
+        # from src/TInitStatics.cpp:1249). A CSV-shaped string still reads 3
+        # because OP_CONV_TO_OBJECT tokenized it into an array first.
         v = self.deref(frame.stack.pop(), frame) if frame.stack else None
-        if isinstance(v, list):
-            frame.stack.append(3.0)
-        elif isinstance(v, GS2Object):
-            frame.stack.append(2.0)
-        elif isinstance(v, str):
-            frame.stack.append(1.0)
-        else:
-            frame.stack.append(0.0)
+        frame.stack.append(3.0 if isinstance(v, list) and v else 0.0)
 
     # --- with / foreach ---
 
@@ -1386,6 +1697,37 @@ class GS2VM:
                 return member(*args)
             if isinstance(member, GS2VM):
                 return member.call(name, *args)
+            # A method call on ANOTHER script's `this`. Scripts publish
+            # themselves into a bare global (`plfunc = this;` in Zelda's
+            # -Player/Functions, `Movement = this;` in -Player/Movement) and
+            # the rest of the world calls them as `plfunc.ModifyClientR(...)`.
+            # Without this the call fell through to the host builtin table,
+            # where a same-named engine builtin silently answered instead:
+            # `plfunc.modifyclientr("hearts", ...)` hit our inert
+            # `modifyclientr` stub, so the flag round-trip that revives a
+            # freshly-logged-in player never happened and Zelda's movement
+            # engine sat in its permanent-death branch. Only `public`
+            # functions are reachable this way, same as the engine.
+            owners = [vm for vm in reversed(getattr(obj, "script_vms", ()) or ())
+                      if vm is not self]
+            for other in owners:
+                if other.has_public_function(name):
+                    cls.builtins_called[name] = cls.builtins_called.get(name, 0) + 1
+                    return other.call(name, *args)
+            # `<script object>.trigger("onSomeEvent", params)` fires an EVENT
+            # on that script -- the engine method, not a script function, so
+            # it is not gated on `public`. Zelda's -Player/Movement fires the
+            # equipped weapon with
+            #   findweapon(weapons[selectedweapon].name).trigger("onweaponfired", null)
+            # (weapon-Player_Movement.txt:473), which is the only way to use a
+            # weapon in that world -- unimplemented, every weapon was inert.
+            if owners and name == "trigger" and args:
+                event = str(args[0])
+                cls.builtins_called[name] = cls.builtins_called.get(name, 0) + 1
+                for other in owners:
+                    if other.has_function(event):
+                        return other.call(event, *args[1:])
+                return 0.0
             if self.host is not None and obj is not None:
                 res = self.host.call_builtin(self, name, args, obj=obj)
                 if res is not NOT_HANDLED:

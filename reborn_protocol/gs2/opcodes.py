@@ -1,14 +1,25 @@
 """GS2 (Reborn Script 2) bytecode opcode table.
 
-Mirrors GServer-v2/build/dependencies/fc/gs2parser-src/src/opcodes.h exactly
-(same names, same numeric values) -- that header is the authoritative source
-since it is the compiler GServer itself uses to produce the bytecode we
-receive over the wire. See memory: none yet (see task-agent report).
+Names and values follow GServer-v2/build/dependencies/fc/gs2parser-src/src/
+opcodes.h -- the compiler GServer itself uses to produce the bytecode we
+receive over the wire -- with additions from the reversed official
+interpreter where that header is simply missing an opcode (OP_DYNAMIC_ADD).
 
 Values with no case in opcode::OpcodeToString() are commented "reserved" or
 left unnamed in the C++ source; we still assign them a symbolic name here
 (OP_<n>) purely so the disassembler has something to print. Do not treat an
 unnamed op's presence in this table as evidence of understood semantics.
+
+Known-incomplete: the official interpreter also dispatches opcodes 200-242
+(FourPlay's include/gs2/GS2OpCodes.h:212-255, handlers at src/
+TScriptMachine.cpp:2733-3005). They are peephole "superinstructions" --
+immediate arithmetic/comparison, compound assignment, and fused register or
+member loads -- each of which additionally SKIPS the next one or two
+instructions (`indexPos += 1/2`). Only a newer official compiler emits them:
+neither gs2parser nor any bytecode we have seen on the wire does, and
+gbf-rs's opcode table stops at 190, so they are deliberately NOT modelled
+here. If a script ever decodes with an opcode in that range, the disassembly
+AND any VM run of it are wrong, not merely incomplete.
 """
 from __future__ import annotations
 
@@ -56,19 +67,21 @@ class Op(IntEnum):
     # 45-47 have no case in the open-source gs2parser (opcodes.h keeps them
     # as OP_UNKNOWN_*): only the official compiler emits them, as an
     # expression-cache for repeated subexpressions (notably foreach loop
-    # variables/collections). Semantics recovered from the reversed official
-    # client interpreter, Preagonal/FourPlay/quattroplay/asm/TScriptMachine/
-    # _ZN14TScriptMachine13executeScriptEv.s:
-    #   caseD_2d (45): registers[n].copyFrom(stackTop) -- store the current
-    #     stack top into VM register n (operand, bounded 0..0x3FF) WITHOUT
+    # variables/collections). Semantics from the reversed official client
+    # interpreter, Preagonal/FourPlay/quattroplay/src/TScriptMachine.cpp
+    # (OP_UNKNOWN_45/46/47 cases at :2708-2732, register file accessor at
+    # :2160-2169):
+    #   45: registers[n].copyFrom(stackTop) -- store the current stack top
+    #     into register n (operand, indices >= 0x400 rejected) WITHOUT
     #     popping (the compiler emits OP_INDEX_DEC right after).
-    #   caseD_2e (46): push a copy of registers[n] (after
-    #     switchTypeProperty(true) on the register).
-    #   caseD_2f (47): TScriptStackEntry::switchTypeProperty(machine, true)
-    #     on the stack top in place -- convert it to a variable/property
+    #   46: switchTypeProperty(true) on registers[n], then push a copy.
+    #   47: TScriptStackEntry::switchTypeProperty(machine, true) on the
+    #     stack top in place -- convert it to a variable/property
     #     reference; always emitted immediately before OP_REG_STORE.
-    # Cross-reference: Preagonal/GraalNetwork/gs2-analysis .../Opcode.kt
-    # names them SET/GET/MARK_LOOP_VARIABLE (0x2d/0x2e/0x2f).
+    # Cross-references: gbf-rs (Preagonal/gbf-rs/gbf_core/src/opcode.rs:
+    # 324-326) names them SetRegister/GetRegister/MarkRegisterVariable, and
+    # Preagonal/GraalNetwork/gs2-analysis .../Opcode.kt names them
+    # SET/GET/MARK_LOOP_VARIABLE -- three independent recoveries agreeing.
     OP_REG_STORE = 45
     OP_REG_LOAD = 46
     OP_CONV_TO_PROPERTY = 47
@@ -85,6 +98,11 @@ class Op(IntEnum):
     OP_DIV = 63
     OP_MOD = 64
     OP_POW = 65
+    # 66/67 are OP_UNKNOWN_* in gs2parser (never emitted by it), but the
+    # official interpreter has real handlers: non-short-circuiting logical
+    # AND / OR over the two top entries' numeric slots, pushing 1.0/0.0
+    # (Preagonal/FourPlay/quattroplay/src/TScriptMachine.cpp:3127-3151).
+    # Names kept as-is so this table still mirrors opcodes.h one-for-one.
     OP_UNKNOWN_66 = 66
     OP_UNKNOWN_67 = 67
     OP_NOT = 68
@@ -136,6 +154,12 @@ class Op(IntEnum):
     OP_OBJ_TOKENIZE = 118
     OP_TRANSLATE = 119
     OP_OBJ_POSITIONS = 120
+    # Not in gs2parser's opcodes.h at all (its table jumps 120 -> 130); named
+    # and handled by the official interpreter as a runtime-typed `+`: string
+    # concat if either operand is a string, numeric add otherwise
+    # (Preagonal/FourPlay/quattroplay/include/gs2/GS2OpCodes.h:133 and
+    # src/TScriptMachine.cpp:3452-3475 of the executeScript switch).
+    OP_DYNAMIC_ADD = 121
 
     OP_OBJ_SIZE = 130
     OP_ARRAY = 131
@@ -188,6 +212,13 @@ OPERAND_OPS = frozenset({
     Op.OP_REG_STORE,
     Op.OP_REG_LOAD,
 })
+
+# NB this set is an eager-parse hint, not a completeness claim: disasm.decode
+# also attaches a stray 0xF0-0xF6 record to whatever opcode precedes it, so an
+# operand on an op that is NOT listed here still decodes (it never desyncs the
+# stream). That matters for OP_IN_RANGE, which the official interpreter reads
+# a "mode" operand for (src/TScriptMachine.cpp:3195 -> inRange(op->value))
+# even though gs2parser emits it bare, and for the 200-242 superinstructions.
 
 #: Ops for which the dynamic operand is a signed number (literal constant or
 #: a jump-target instruction-index -- disambiguated by which opcode owns it,
