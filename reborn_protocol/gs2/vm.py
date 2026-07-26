@@ -1506,6 +1506,22 @@ class GS2VM:
         else:
             frame.stack.append([])
 
+    def _op_obj_link(self, frame, instr):
+        # `x.link()` (GS2BuiltInFunctions.cpp:172-175) swaps the entry's
+        # object for a link-var ALIASING it rather than a copy
+        # (TScriptEnvironment::makeLinkVar -> linkValueTo,
+        # src/TScriptEnvironment.cpp:175-193); Python object values are
+        # already references, so the link is the identity, and a receiver
+        # with no object links nullptr and reads back as null.
+        # The decompiled C++ then retypes the entry to the arg-list start
+        # marker (`type = Array`, src/TScriptMachine.cpp:3339), which would
+        # truncate the enclosing call's arguments; its own asm stores the
+        # object type (`movl $0x3,(%rax)`, asm/TScriptMachine/
+        # _ZN14TScriptMachine13executeScriptEv.s_decomped:3235) and wins --
+        # -ScriptedRC_GuiEditor passes `script.link()` as a non-final arg.
+        v = self.deref(frame.stack.pop(), frame) if frame.stack else None
+        frame.stack.append(v if isinstance(v, (GS2Object, list)) else GS2_NULL)
+
     def _op_obj_type(self, frame, instr):
         # `x.type()` is NOT the 0/1/2/3 type tag opcodes.h guesses at. The
         # official handler pushes 3.0 when the (already OP_CONV_TO_OBJECT'd)
@@ -1633,11 +1649,14 @@ class GS2VM:
                 if res is not NOT_HANDLED:
                     cls.builtins_called[name] = cls.builtins_called.get(name, 0) + 1
                     return res
-            if isinstance(obj, list):
-                res = self._list_method(obj, name, args)
-                if res is not NOT_HANDLED:
-                    cls.builtins_called[name] = cls.builtins_called.get(name, 0) + 1
-                    return res
+            res = self._root_object_method(obj, name, args)
+            if res is not NOT_HANDLED:
+                cls.builtins_called[name] = cls.builtins_called.get(name, 0) + 1
+                return res
+            # No fall-through to the bare-name builtins: resolveObjectMember
+            # with an explicit object consults that object's property table
+            # and its own vars, then gives up -- it never reaches the level
+            # or the universe globals (src/TScriptMachine.cpp:5283-5322).
             cls.builtins_missing[name] = cls.builtins_missing.get(name, 0) + 1
             self._log_once(("method", name), "GS2 %s: unknown method %s()", self.name, name)
             return 0.0
@@ -1695,6 +1714,21 @@ class GS2VM:
         if callable(target):
             return target(*args)
         return 0.0
+
+    #: Names in _list_method that the reference registers on the root object
+    #: class -- i.e. on EVERY object, not only on arrays (`addarray`
+    #: src/TGraalVarProperties.cpp:233, `sortbyvalue` :575). The rest of
+    #: _list_method mirrors compiled opcodes (OP_OBJ_ADDSTRING /
+    #: OP_OBJ_SIZE / OP_OBJ_CLEAR / OP_OBJ_INDEX) and is not a registered
+    #: name, so it must stay array-only.
+    _ROOT_OBJECT_METHODS = frozenset({"addarray", "sortbyvalue"})
+
+    def _root_object_method(self, obj: Any, name: str, args: List[Any]) -> Any:
+        if isinstance(obj, list):
+            return self._list_method(obj, name, args)
+        if obj is not None and name in self._ROOT_OBJECT_METHODS:
+            return None  # object with no array cells: nothing to extend/sort
+        return NOT_HANDLED
 
     @staticmethod
     def _list_method(arr: list, name: str, args: List[Any]) -> Any:

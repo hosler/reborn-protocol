@@ -20,7 +20,7 @@ import pytest
 
 from reborn_protocol.gs2 import GS2VM, GS2Object, printf_format, gs2_eq, to_str
 from reborn_protocol.gs2.container import GS2Container
-from reborn_protocol.gs2.values import LValue, VarRef, fmt_num, gs2_compare
+from reborn_protocol.gs2.values import GS2_NULL, LValue, VarRef, fmt_num, gs2_compare
 from reborn_protocol.gs2.vm import _Frame
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "gs2", "vm")
@@ -438,6 +438,50 @@ def test_missing_function_returns_none(objects):
     assert objects.call("noSuchFunction") is None
 
 
+# --------------------------------------------------------------------- link
+
+@pytest.fixture(scope="module")
+def link():
+    return load("07_link")
+
+
+def test_link_aliases_the_array(link):
+    # `temp.b = temp.a.link()` links rather than copies
+    # (TScriptEnvironment::makeLinkVar -> linkValueTo,
+    # Preagonal/FourPlay/quattroplay/src/TScriptEnvironment.cpp:175-193), so
+    # adding through b is visible through a.
+    assert link.call("aliasArray") == 4
+
+
+def test_link_of_this_is_this(link):
+    assert link.call("linkOfThis") == 9
+
+
+def test_link_argument_does_not_truncate_the_argument_list(link):
+    # The decompiled OP_OBJ_LINK sets the entry type to the arg-list start
+    # marker (src/TScriptMachine.cpp:3339); the asm stores the object type
+    # instead (asm/TScriptMachine/
+    # _ZN14TScriptMachine13executeScriptEv.s_decomped:3235). With the marker
+    # reading, `sumSizes(1, temp.arr.link(), 3)` would lose both neighbours.
+    assert link.call("linkAsMiddleArgument") == 6
+
+
+def test_link_of_a_non_object_is_null():
+    vm = GS2VM(GS2Container())
+    frame = _Frame(0, [])
+
+    obj = GS2Object(name="holder")
+    arr = [1.0]
+    obj.set("rows", arr)
+    frame.stack.append(LValue(obj, "rows"))
+    vm._op_obj_link(frame, None)
+    assert frame.stack.pop() is arr
+
+    frame.stack.append(VarRef("neverSet"))
+    vm._op_obj_link(frame, None)
+    assert frame.stack.pop() is GS2_NULL
+
+
 # --------------------------------------------------------------- unit pieces
 
 def test_printf_format():
@@ -850,6 +894,29 @@ def test_list_methods_native_dispatch():
 
     # unknown methods still fall through to builtins_missing, returning 0.0
     assert vm._call_target(LValue(lst, "definitelynotamethod"), [], frame) == 0.0
+
+
+def test_root_object_methods_answer_on_any_object():
+    """`addarray` / `sortbyvalue` are registered on the root object class, so
+    they exist on every object -- Preagonal/FourPlay/quattroplay/
+    src/TGraalVarProperties.cpp:233 and :575, installed by that file's
+    constructor (:12-15). On a receiver with no array cells they do nothing,
+    but they must not be reported as unknown methods, and (unlike a bare
+    name) they must not fall through to the global surface."""
+    vm = GS2VM(GS2Container())
+    frame = _Frame(0, [])
+    obj = GS2Object(name="npc")
+
+    GS2VM.reset_coverage()
+    assert vm._call_target(LValue(obj, "sortbyvalue"), [0.0, "string", 1.0], frame) is None
+    assert vm._call_target(LValue(obj, "addarray"), [[1.0]], frame) is None
+    assert not GS2VM.builtins_missing
+
+    # names the reference compiles to opcodes instead of registering stay
+    # array-only: on a plain object they are genuinely unknown
+    assert vm._call_target(LValue(obj, "add"), [1.0], frame) == 0.0
+    assert "add" in GS2VM.builtins_missing
+    GS2VM.reset_coverage()
 
 
 def test_member_write_on_undefined_bare_name_vivifies_holder():

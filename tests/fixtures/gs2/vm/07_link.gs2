@@ -1,0 +1,22 @@
+function aliasArray() {
+  temp.a = {1, 2, 3};
+  temp.b = temp.a.link();
+  temp.b.add(4);
+  return temp.a.size();
+}
+
+function linkOfThis() {
+  this.counter = 7;
+  temp.o = this.link();
+  temp.o.counter = 9;
+  return this.counter;
+}
+
+function sumSizes(a, b, c) {
+  return a + b.size() + c;
+}
+
+function linkAsMiddleArgument() {
+  temp.arr = {5, 6};
+  return sumSizes(1, temp.arr.link(), 3);
+}
