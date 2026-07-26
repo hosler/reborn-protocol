@@ -919,6 +919,71 @@ def test_root_object_methods_answer_on_any_object():
     GS2VM.reset_coverage()
 
 
+def test_copyfrom_is_a_root_object_method():
+    """`obj.copyfrom(o)` is registered on the root object class
+    (Preagonal/FourPlay/quattroplay/src/TGraalVarProperties.cpp:278-285,
+    'v' params "o") and its body is TGraalVar::copyFrom
+    (src/TGraalVar.cpp:2203-2371): members copied with arrays CLONED,
+    object references shared, null source CLEARS, self-copy no-ops. The
+    live Scripted_RC weapon bytecode calls it six times."""
+    vm = GS2VM(GS2Container())
+    frame = _Frame(0, [])
+    src = GS2Object(name="src")
+    src.set("n", 5.0)
+    src.set("s", "hi")
+    src.set("arr", [1.0, [2.0]])
+    shared = GS2Object(name="shared")
+    src.set("obj", shared)
+
+    dst = GS2Object(name="dst")
+    dst.set("stale", 1.0)
+    GS2VM.reset_coverage()
+    assert vm._call_target(LValue(dst, "copyfrom"), [src], frame) is None
+    assert not GS2VM.builtins_missing
+    assert dst.get("n") == 5.0 and dst.get("s") == "hi"
+    assert dst.get("obj") is shared              # objects stay references
+    assert dst.get("arr") == [1.0, [2.0]]
+    assert dst.get("arr") is not src.get("arr")  # arrays are cloned...
+    assert dst.get("arr")[1] is not src.get("arr")[1]  # ...recursively
+    assert dst.get("stale") == 1.0               # copy, not replace
+
+    # a null/None source clears (TGraalVar.cpp:2216-2221)
+    vm._call_target(LValue(dst, "copyfrom"), [GS2_NULL], frame)
+    assert len(dst) == 0
+
+    # self-copy is a no-op (:2205)
+    src_len = len(src)
+    vm._call_target(LValue(src, "copyfrom"), [src], frame)
+    assert len(src) == src_len
+
+    # array-valued receiver: the source array replaces the target, cloned
+    lst = [9.0]
+    vm._call_target(LValue(lst, "copyfrom"), [[1.0, [2.0]]], frame)
+    assert lst == [1.0, [2.0]]
+    GS2VM.reset_coverage()
+
+
+def test_lookup_resolves_dotted_makevar_names():
+    """OP_MAKEVAR pushes the WHOLE dotted string as one VarRef name --
+    `makevar("temp.creds." @ temp.field)` compiles to OP_CONV_TO_STRING;
+    OP_MAKEVAR with no Call op (gs2test-verified) -- so deref must walk the
+    dots: head through the normal scope chain, the rest through members
+    (the live Mobile weapon-LoginScreen getAccountField idiom)."""
+    vm = GS2VM(GS2Container())
+    frame = _Frame(0, [])
+    creds = GS2Object(name="creds")
+    creds.set("pass", "blob")
+    frame.temps.set("creds", creds)
+    assert vm._lookup("temp.creds.pass", frame) == "blob"
+    # a miss anywhere along the path stays None (resolves to Number 0.0)
+    assert vm._lookup("temp.creds.nope", frame) is None
+    assert vm._lookup("temp.nope.pass", frame) is None
+    # non-temp heads walk the same chain: a global object holder
+    vm.globals["cfg"] = cfg = GS2Object(name="cfg")
+    cfg.set("port", 14900.0)
+    assert vm._lookup("cfg.port", frame) == 14900.0
+
+
 def test_member_write_on_undefined_bare_name_vivifies_holder():
     """`tmp.node = x` with no prior `tmp` (a plain identifier, NOT the
     temp. prefix -- the live Login serverlist builder's idiom): GS2Engine's
@@ -1039,7 +1104,10 @@ def test_string_compare_is_case_insensitive_and_numeric_against_numbers():
     assert gs2_compare("abc", "abd") < 0
     assert gs2_compare("B", "a") > 0
     assert gs2_compare("5", 5.0) == 0
-    assert gs2_compare("abc", 0.0) == 0      # strtofloat("abc") == 0
+    # strtofloat of a word strtod can't read is -1.0 (values.strtofloat),
+    # so `<number> == "<word>"` is FALSE -- earlier waves locked ==0 here.
+    assert gs2_compare("abc", 0.0) < 0
+    assert gs2_compare("abc", -1.0) == 0
     assert gs2_compare(3.0, "10") < 0        # numeric, not lexicographic
 
 

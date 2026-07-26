@@ -41,8 +41,8 @@ from .values import (  # noqa: F401 -- the coercion policy lives in values.py;
     # gs2.vm names.
     ARRAY_INDEX_EPSILON, ARRAY_START, GS2_NULL, ElemRef, GS2Object, LValue,
     MAX_ARRAY_SIZE, SCRIPT_EPSILON, VarRef, _f32, array_index, array_size,
-    casefold, fmt_num, gs2_compare, gs2_eq, to_bool, to_int32, to_num, to_str,
-    wrap_int32,
+    casefold, copy_value, fmt_num, gs2_compare, gs2_eq, gs2_to_num,
+    gs2_truthy, strtofloat, to_bool, to_int32, to_num, to_str, wrap_int32,
 )
 
 logger = logging.getLogger(__name__)
@@ -237,17 +237,17 @@ def printf_format(fmt: str, args: List[Any]) -> str:
         v = next_arg()
         try:
             if spec in "diu":
-                py = f"%{width}d" % int(to_num(v))
+                py = f"%{width}d" % int(gs2_to_num(v))
             elif spec in "oxX":
-                py = f"%{width}{spec}" % int(to_num(v))
+                py = f"%{width}{spec}" % int(gs2_to_num(v))
             elif spec == "c":
-                n = to_num(v)
+                n = gs2_to_num(v)
                 py = chr(int(n)) if isinstance(v, (int, float)) or _looks_numeric(v) else to_str(v)[:1]
                 if width:
                     py = f"%{width}s" % py
             elif spec in "feEgG":
                 p = prec if prec is not None else "6"
-                py = f"%{width}.{p}{spec}" % to_num(v)
+                py = f"%{width}.{p}{spec}" % gs2_to_num(v)
             else:  # %s
                 s = to_str(v)
                 if prec is not None:
@@ -507,7 +507,7 @@ class GS2VM:
 
             try:
                 if opnum == Op.OP_SLEEP and coro_mode:
-                    secs = to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
+                    secs = gs2_to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
                     if secs > 0:
                         yield float(secs)
                         self._ops_used = 0
@@ -568,6 +568,25 @@ class GS2VM:
             obj = self.host.get_object(key)
             if obj is not None:
                 return obj
+        if "." in key:
+            # A DOTTED name as one string: what OP_MAKEVAR pushes for
+            # `makevar("temp.creds." @ temp.field)` (compiled as
+            # OP_CONV_TO_STRING; OP_MAKEVAR -- gs2test-verified, no Call op),
+            # resolved here at deref. Walk head through the normal chain
+            # ("temp" is the frame scope), then members. Read-only: a dotted
+            # WRITE stays unresolved, same as before.
+            head, _, rest = key.partition(".")
+            if head == "temp":
+                node: Any = frame.temps
+            elif head in ("this", "thiso"):
+                node = self.this if head == "this" else self.thiso
+            else:
+                node = self._lookup(head, frame)   # head has no dot
+            for part in rest.split("."):
+                if not isinstance(node, GS2Object):
+                    return None
+                node = node.get(part)
+            return node
         return None
 
     def _assign_name(self, name: str, value: Any, frame: "_Frame") -> None:
@@ -638,19 +657,19 @@ class GS2VM:
 
     def _op_set_index_true(self, frame, instr):
         v = self.deref(frame.stack.pop(), frame) if frame.stack else None
-        if to_bool(v):
+        if gs2_truthy(v):
             return int(instr.operand.value)
         return None
 
     def _op_if(self, frame, instr):
         v = self.deref(frame.stack.pop(), frame) if frame.stack else None
-        if not to_bool(v):
+        if not gs2_truthy(v):
             return int(instr.operand.value)
         return None
 
     def _op_or(self, frame, instr):
         v = self.deref(frame.stack.pop(), frame) if frame.stack else None
-        if to_bool(v):
+        if gs2_truthy(v):
             frame.stack.append(True)
             return int(instr.operand.value)
         return None
@@ -660,7 +679,7 @@ class GS2VM:
         # underflow the OP_INLINE_CONDITIONAL that follows -- compiler layout
         # requires exactly one value at the merge point)
         v = self.deref(frame.stack.pop(), frame) if frame.stack else None
-        if not to_bool(v):
+        if not gs2_truthy(v):
             frame.stack.append(False)
             return int(instr.operand.value)
         return None
@@ -676,7 +695,7 @@ class GS2VM:
         raise _ReturnValue(v)
 
     def _op_sleep(self, frame, instr):
-        secs = to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
+        secs = gs2_to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
         if self.host is not None:
             self.host.sleep(self, secs)
         return None
@@ -801,13 +820,17 @@ class GS2VM:
 
     def _op_conv_to_float(self, frame, instr):
         v = self.deref(frame.stack.pop(), frame) if frame.stack else None
-        # Arrays/objects pass through unchanged: the compiler emits this op
-        # in front of e.g. arraylen()'s OP_OBJ_SIZE (sig-driven conversion),
-        # which only works on the official client if the array survives.
+        # Arrays/objects pass through unchanged -- a DELIBERATE divergence
+        # from switchTypeFloat (which reads an object var's float slot,
+        # 0.0 -- values.gs2_to_num models that): gs2parser's sig-driven
+        # conversion emits this op in front of arraylen()'s OP_OBJ_SIZE,
+        # and that bytecode (which pygserver serves us) only works if the
+        # array survives. Everything scalar takes the faithful path, so
+        # `if ("word")` still sees strtofloat's -1.0.
         if isinstance(v, (list, GS2Object)):
             frame.stack.append(v)
         else:
-            frame.stack.append(to_num(v))
+            frame.stack.append(gs2_to_num(v))
 
     def _op_conv_to_string(self, frame, instr):
         v = self.deref(frame.stack.pop(), frame) if frame.stack else None
@@ -948,7 +971,7 @@ class GS2VM:
 
     def _op_inline_conditional(self, frame, instr):
         v = self.deref(frame.stack.pop(), frame) if frame.stack else None
-        frame.stack.append(1.0 if to_bool(v) else 0.0)
+        frame.stack.append(1.0 if gs2_truthy(v) else 0.0)
 
     # --- assignment / params ---
 
@@ -977,7 +1000,7 @@ class GS2VM:
 
     def _op_inc(self, frame, instr):
         target = frame.stack.pop() if frame.stack else None
-        n = to_num(self.deref(target, frame)) + 1
+        n = gs2_to_num(self.deref(target, frame)) + 1
         if isinstance(target, (VarRef, LValue)):
             self._write_ref(target, n, frame)
             frame.stack.append(target)
@@ -987,7 +1010,7 @@ class GS2VM:
 
     def _op_dec(self, frame, instr):
         target = frame.stack.pop() if frame.stack else None
-        n = to_num(self.deref(target, frame)) - 1
+        n = gs2_to_num(self.deref(target, frame)) - 1
         if isinstance(target, (VarRef, LValue)):
             self._write_ref(target, n, frame)
             frame.stack.append(target)
@@ -998,8 +1021,8 @@ class GS2VM:
     #     compiler-emitted OP_CONV_TO_FLOAT where applicable) ---
 
     def _pop2num(self, frame) -> Tuple[float, float]:
-        b = to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
-        a = to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
+        b = gs2_to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
+        a = gs2_to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
         return a, b
 
     def _op_add(self, frame, instr):
@@ -1048,15 +1071,15 @@ class GS2VM:
         if isinstance(a, str) or isinstance(b, str):
             frame.stack.append(to_str(a) + to_str(b))
         else:
-            frame.stack.append(to_num(a) + to_num(b))
+            frame.stack.append(gs2_to_num(a) + gs2_to_num(b))
 
     def _op_not(self, frame, instr):
         v = self.deref(frame.stack.pop(), frame) if frame.stack else None
-        frame.stack.append(not to_bool(v))
+        frame.stack.append(not gs2_truthy(v))
 
     def _op_unarysub(self, frame, instr):
         v = self.deref(frame.stack.pop(), frame) if frame.stack else None
-        frame.stack.append(-to_num(v))
+        frame.stack.append(-gs2_to_num(v))
 
     # OP_EQ..OP_GTE all funnel through the one 3-way TScriptMachine::compare()
     # (src/TScriptMachine.cpp:3164-3190), so they inherit its string
@@ -1134,15 +1157,15 @@ class GS2VM:
         # each with the 1e-4 tolerance), and leaves the operand off entirely.
         # An array-valued left operand tests EVERY cell
         # (TScriptMachine::inRange, src/TScriptMachine.cpp:92-135).
-        hi = to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
-        lo = to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
+        hi = gs2_to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
+        lo = gs2_to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
         v = self.deref(frame.stack.pop(), frame) if frame.stack else 0.0
         mode = int(instr.operand.value) if instr is not None and instr.operand else 0
         if isinstance(v, list) and v:
-            ok = all(_value_in_range(to_num(x), lo, hi, mode) for x in v)
+            ok = all(_value_in_range(gs2_to_num(x), lo, hi, mode) for x in v)
         else:
             # empty array / scalar: converted with switchTypeFloat first
-            ok = _value_in_range(to_num(v), lo, hi, mode)
+            ok = _value_in_range(gs2_to_num(v), lo, hi, mode)
         frame.stack.append(ok)
 
     def _op_in_obj(self, frame, instr):
@@ -1167,7 +1190,7 @@ class GS2VM:
         frame.stack.append(float(array_index(v)))
 
     def _op_abs(self, frame, instr):
-        v = to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
+        v = gs2_to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
         frame.stack.append(abs(v))
 
     def _op_random(self, frame, instr):
@@ -1178,19 +1201,19 @@ class GS2VM:
     # GS2Engine's 1e-6 snap-to-zero is its own invention; the official machine has none.
 
     def _op_sin(self, frame, instr):
-        v = to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
+        v = gs2_to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
         frame.stack.append(math.sin(v))
 
     def _op_cos(self, frame, instr):
-        v = to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
+        v = gs2_to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
         frame.stack.append(math.cos(v))
 
     def _op_arctan(self, frame, instr):
-        v = to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
+        v = gs2_to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
         frame.stack.append(math.atan(v))
 
     def _op_exp(self, frame, instr):
-        v = to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
+        v = gs2_to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
         try:
             frame.stack.append(math.exp(v))
         except OverflowError:
@@ -1248,7 +1271,7 @@ class GS2VM:
         frame.stack.append(0.0 if d > 3 else {0: -1.0, 2: 1.0}.get(d, 0.0))
 
     def _op_char(self, frame, instr):
-        v = to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
+        v = gs2_to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
         try:
             frame.stack.append(chr(int(v)))
         except (ValueError, OverflowError):
@@ -1555,7 +1578,7 @@ class GS2VM:
         idx_entry = frame.stack.pop()
         obj_entry = frame.stack.pop()
         var_entry = frame.stack.pop()
-        idx = int(to_num(self.deref(idx_entry, frame)))
+        idx = int(gs2_to_num(self.deref(idx_entry, frame)))
         obj = self.deref(obj_entry, frame) if isinstance(obj_entry, (VarRef, LValue)) else obj_entry
 
         if isinstance(obj, GS2Object):
@@ -1726,6 +1749,14 @@ class GS2VM:
     def _root_object_method(self, obj: Any, name: str, args: List[Any]) -> Any:
         if isinstance(obj, list):
             return self._list_method(obj, name, args)
+        if name == "copyfrom" and isinstance(obj, GS2Object):
+            # obj.copyfrom(o): registered on the root object class
+            # (src/TGraalVarProperties.cpp:278-285, 'v' "o"), so it reaches
+            # every object -- the live Scripted_RC weapon calls it. The
+            # host is consulted first (above), so engine-backed objects
+            # can keep the reference's gated no-op by overriding copy_from.
+            obj.copy_from(args[0] if args else None)
+            return None
         if obj is not None and name in self._ROOT_OBJECT_METHODS:
             return None  # object with no array cells: nothing to extend/sort
         return NOT_HANDLED
@@ -1756,14 +1787,21 @@ class GS2VM:
                 if gs2_eq(x, value):
                     return float(i)
             return -1.0
+        if name == "copyfrom":
+            # TGraalVar::copyFrom on an array-valued target: the source's
+            # array replaces the target's, cells CLONED (src/TGraalVar.cpp:
+            # 2248-2257); a null/non-array source clears (:2216-2221).
+            other = args[0] if args else None
+            arr[:] = copy_value(other) if isinstance(other, list) else []
+            return None
         if name == "sortbyvalue":
             # sortbyvalue(fieldindex, "float"|"string", ascending): entries
             # are CSV-row strings (or nested lists); sort by field
             # <fieldindex>, numerically for "float". Seen live in
             # -Mobile/Serverlist sortServers().
-            idx = int(to_num(args[0])) if len(args) > 0 else 0
+            idx = int(gs2_to_num(args[0])) if len(args) > 0 else 0
             as_float = to_str(args[1] if len(args) > 1 else "") == "float"
-            ascending = to_bool(args[2]) if len(args) > 2 else True
+            ascending = gs2_truthy(args[2]) if len(args) > 2 else True
 
             def field(row: Any) -> Any:
                 if isinstance(row, list):
@@ -1771,7 +1809,7 @@ class GS2VM:
                 else:
                     toks = gs1_csv_split(to_str(row))
                     cell = toks[idx] if 0 <= idx < len(toks) else ""
-                return to_num(cell) if as_float else to_str(cell)
+                return gs2_to_num(cell) if as_float else to_str(cell)
 
             try:
                 arr.sort(key=field, reverse=not ascending)
