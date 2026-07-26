@@ -1,12 +1,32 @@
-"""GS1 value coercion.
+"""GS1 value coercion -- the ONE home for GS1's coercion policy.
 
 GS1 is loosely typed: a value is a number (float), a string, or an array. The
 C++ engine's GameValue can even hold a number AND a string simultaneously; we
 model the common single-type case and coerce on demand. See memory:
 gs1-python-port.
+
+Every GS1 coercion rule lives here and nowhere else, so a new call site picks
+a named rule instead of re-deriving one. The GS2 engine has its OWN home
+(``reborn_protocol.gs2.values``) whose rules deliberately differ -- two
+engines, two reversed sources; never unify them:
+
+===================== ================================ ======================
+rule                  GS1 (this module)                GS2 (gs2.values)
+===================== ================================ ======================
+float -> string       ``fmt_num``: shortest repr that  ``fmt_num``: float32
+                      round-trips                      zero test + ``%.9f``
+compare epsilon       ``COMPARE_EPSILON`` 1e-4 for     ``SCRIPT_EPSILON``
+                      ``==``; ``_DOUBLE_EPS`` 2.2e-16  1e-4 everywhere
+                      for unary ``!``
+number -> int         ``gs1_int`` truncate /           ``to_int32`` truncate
+                      ``gs1_index`` floor              + int32 clamp
+condition truthiness  ``gs1_truthy``: numbers NEVER    ``to_bool``: C-like
+                      truthy
+===================== ================================ ======================
 """
 from __future__ import annotations
 
+import math
 import re
 
 _LEADING_NUM = re.compile(r"\s*[-+]?(?:\d+\.?\d*|\.\d+)")
@@ -133,3 +153,33 @@ def gs1_truthy(v) -> bool:
     if isinstance(v, str):
         return v != ""
     return False
+
+
+#: DoublesAreSame (CommonTypes.h): the tolerance ExpressionEquality compares
+#: with. Numerically the same constant GS2 uses for EVERY relational op, but
+#: GS1 applies it to `==`/`!=` only -- `<`/`>`/`<=`/`>=` are exact (see
+#: interp.Interpreter._binop), so the two are not interchangeable.
+COMPARE_EPSILON = 0.0001
+
+
+def doubles_are_same(a: float, b: float) -> bool:
+    """DoublesAreSame(a, b) -- GS1's `==`/`!=` numeric tolerance."""
+    return abs(a - b) < COMPARE_EPSILON
+
+
+def gs1_int(v) -> int:
+    """C `static_cast<int64_t>(double)`: truncate TOWARD ZERO.
+
+    The cast GS1 applies where the C++ source casts to an integer type: `%`
+    (both operands, GS1Visitor.cpp) and the `int()` script function. Distinct
+    from `gs1_index` below -- for a negative operand truncation and floor
+    disagree, so which one a call site wants is never guesswork."""
+    return int(to_num(v))
+
+
+def gs1_index(v) -> int:
+    """`floor(v)` -- the index conversion GS1's array/string/slot builtins use
+    (getstring/setstring index, substring bounds, char/vecx/vecy, gattrib
+    slots). Unlike GS2's `array_index` there is NO epsilon here: the C++ side
+    floors the double directly."""
+    return int(math.floor(to_num(v)))

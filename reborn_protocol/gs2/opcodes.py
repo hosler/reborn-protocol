@@ -12,14 +12,9 @@ unnamed op's presence in this table as evidence of understood semantics.
 
 Known-incomplete: the official interpreter also dispatches opcodes 200-242
 (FourPlay's include/gs2/GS2OpCodes.h:212-255, handlers at src/
-TScriptMachine.cpp:2733-3005). They are peephole "superinstructions" --
-immediate arithmetic/comparison, compound assignment, and fused register or
-member loads -- each of which additionally SKIPS the next one or two
-instructions (`indexPos += 1/2`). Only a newer official compiler emits them:
-neither gs2parser nor any bytecode we have seen on the wire does, and
-gbf-rs's opcode table stops at 190, so they are deliberately NOT modelled
-here. If a script ever decodes with an opcode in that range, the disassembly
-AND any VM run of it are wrong, not merely incomplete.
+TScriptMachine.cpp:2733-3005). If a script ever decodes with an opcode in
+that range, the disassembly AND any VM run of it are wrong, not merely
+incomplete.
 """
 from __future__ import annotations
 
@@ -81,7 +76,7 @@ class Op(IntEnum):
     # Cross-references: gbf-rs (Preagonal/gbf-rs/gbf_core/src/opcode.rs:
     # 324-326) names them SetRegister/GetRegister/MarkRegisterVariable, and
     # Preagonal/GraalNetwork/gs2-analysis .../Opcode.kt names them
-    # SET/GET/MARK_LOOP_VARIABLE -- three independent recoveries agreeing.
+    # SET/GET/MARK_LOOP_VARIABLE.
     OP_REG_STORE = 45
     OP_REG_LOAD = 46
     OP_CONV_TO_PROPERTY = 47
@@ -213,12 +208,8 @@ OPERAND_OPS = frozenset({
     Op.OP_REG_LOAD,
 })
 
-# NB this set is an eager-parse hint, not a completeness claim: disasm.decode
-# also attaches a stray 0xF0-0xF6 record to whatever opcode precedes it, so an
-# operand on an op that is NOT listed here still decodes (it never desyncs the
-# stream). That matters for OP_IN_RANGE, which the official interpreter reads
-# a "mode" operand for (src/TScriptMachine.cpp:3195 -> inRange(op->value))
-# even though gs2parser emits it bare, and for the 200-242 superinstructions.
+#: OP_IN_RANGE carries a "mode" operand
+#: (src/TScriptMachine.cpp:3195 -> inRange(op->value)).
 
 #: Ops for which the dynamic operand is a signed number (literal constant or
 #: a jump-target instruction-index -- disambiguated by which opcode owns it,

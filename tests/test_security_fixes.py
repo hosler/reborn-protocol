@@ -6,6 +6,7 @@ import pytest
 import reborn_protocol.codec as codec_module
 from reborn_protocol.codec import Gen4Codec, Gen5Codec, PacketBuilder, ServerCodec
 from reborn_protocol.encryption import (
+    CompressionPolicy,
     CompressionType,
     MAX_DECOMPRESSED_SIZE,
     decompress_data,
@@ -30,7 +31,12 @@ def test_gstring_writers_truncate_body_to_encoded_header_length():
 def test_oversize_gen5_send_does_not_advance_cipher(monkeypatch, codec_class):
     instance = codec_class(17)
     initial_iterator = instance.out_codec.iterator
+    # ServerCodec compresses via compress_data; Gen5Codec via its session's
+    # CompressionPolicy. Force both seams to produce an oversize bundle.
     monkeypatch.setattr(codec_module, "compress_data", lambda data: (
+        b"x" * codec_module.MAX_PACKET_LEN, CompressionType.ZLIB
+    ))
+    monkeypatch.setattr(CompressionPolicy, "compress", lambda self, data: (
         b"x" * codec_module.MAX_PACKET_LEN, CompressionType.ZLIB
     ))
 

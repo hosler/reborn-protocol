@@ -22,7 +22,8 @@ from .runtime import (Context, Host, MemoryHost, VarStore, UNSET, NAMESPACES,
                       RESERVED_CONSTANTS,
                       BreakSignal, ContinueSignal, ReturnSignal)
 from .values import (to_num, to_str, fmt_num,
-                     gs1_num, gs1_truthy, is_double_zero)
+                     gs1_num, gs1_truthy, is_double_zero,
+                     gs1_int, gs1_index, doubles_are_same)
 
 # commands the interpreter handles itself (manipulate the var store)
 _VAR_COMMANDS = {
@@ -353,7 +354,7 @@ class Interpreter:
                 target_code = codes[0] if len(codes) == 1 else target_code
             if (code == "#P" and isinstance(target_code, ast.MessageCode)
                     and target_code.args):
-                prop = int(math.floor(to_num(self.eval(target_code.args[0]))))
+                prop = gs1_index(self.eval(target_code.args[0]))
                 code = f"#P{prop}"
             first = code if code is not None else self.eval(node.args[0])
             # While the VALUE args are evaluated, the command's own target is
@@ -410,13 +411,13 @@ class Interpreter:
             self._store_set(args[0], gs1_csv_join(items))
         elif name == "deletestring":
             items = self._string_list(args[0])
-            index = max(0, int(math.floor(to_num(self.eval(args[1])))))
+            index = max(0, gs1_index(self.eval(args[1])))
             if index < len(items):
                 del items[index]
                 self._store_set(args[0], gs1_csv_join(items))
         elif name == "insertstring":
             items = self._string_list(args[0])
-            index = max(0, int(math.floor(to_num(self.eval(args[1])))))
+            index = max(0, gs1_index(self.eval(args[1])))
             index = min(index, len(items))
             items.insert(index, to_str(self.eval(args[2])))
             self._store_set(args[0], gs1_csv_join(items))
@@ -430,7 +431,7 @@ class Interpreter:
             self._store_set(args[0], gs1_csv_join(items))
         elif name == "replacestring":
             items = self._string_list(args[0])
-            index = max(0, int(math.floor(to_num(self.eval(args[1])))))
+            index = max(0, gs1_index(self.eval(args[1])))
             text = to_str(self.eval(args[2]))
             if index >= len(items):
                 items.append(text)
@@ -443,7 +444,7 @@ class Interpreter:
             # only the new slots; a negative/zero size clamps to an empty
             # array. If the var doesn't currently hold an array (scalar,
             # string or unset), it's simply replaced with a fresh zero array.
-            size = max(0, int(to_num(self.eval(args[1])))) if len(args) > 1 else 0
+            size = max(0, gs1_int(self.eval(args[1]))) if len(args) > 1 else 0
             cur = self._store_get(args[0])
             new = [0.0] * size
             if isinstance(cur, list):
@@ -514,7 +515,7 @@ class Interpreter:
         if code == "#P":
             if not a:
                 return ""
-            prop = int(math.floor(to_num(self.eval(a[0]))))
+            prop = gs1_index(self.eval(a[0]))
             return to_str(self.ctx.host.message_code(f"#P{prop}", [], self.ctx))
         # computed / string-manipulation codes (faithful to GS1MessageCodes.cpp)
         if code == "#s":
@@ -535,8 +536,8 @@ class Interpreter:
             return to_str(self.eval(a[0])).strip() if a else ""
         if code == "#e":  # substr(start, len, str); negative len = to end
             if len(a) >= 3:
-                start = int(math.floor(to_num(self.eval(a[0]))))
-                length = int(math.floor(to_num(self.eval(a[1]))))
+                start = gs1_index(self.eval(a[0]))
+                length = gs1_index(self.eval(a[1]))
                 s = to_str(self.eval(a[2]))
                 if start < 0:
                     return ""
@@ -545,15 +546,15 @@ class Interpreter:
         if code == "#I":  # csv item by index
             if len(a) >= 2:
                 csv = to_str(self.eval(a[0]))
-                idx = int(math.floor(to_num(self.eval(a[1]))))
+                idx = gs1_index(self.eval(a[1]))
                 items = gs1_csv_split(csv)
                 return items[idx] if 0 <= idx < len(items) else ""
             return ""
         if code == "#K":  # char from ascii code
-            c = min(255, max(0, int(math.floor(to_num(self.eval(a[0])))))) if a else 0
+            c = min(255, max(0, gs1_index(self.eval(a[0])))) if a else 0
             return chr(c)
         if code == "#t":  # tokenize token by index
-            idx = int(math.floor(to_num(self.eval(a[0])))) if a else 0
+            idx = gs1_index(self.eval(a[0])) if a else 0
             toks = self.ctx.tokenize_tokens
             return toks[idx] if 0 <= idx < len(toks) else ""
         if code == "#R":  # random pick among args
@@ -564,7 +565,7 @@ class Interpreter:
         if code in ("#W", "#w"):
             # Indexed forms name a weapon slot; bare forms name the currently
             # selected slot. Selection is client state, so keep it on Host.
-            index = int(math.floor(to_num(self.eval(a[0])))) if a else None
+            index = gs1_index(self.eval(a[0])) if a else None
             return to_str(self.ctx.host.weapon_message_code(code, index, self.ctx))
         # character / context codes (#a account, #n nick, #c chat, #1-8, #C, ...)
         args = [self.eval(x) for x in a]
@@ -686,23 +687,23 @@ class Interpreter:
         # Both operands truncate to an integer FIRST (C int64_t semantics:
         # `static_cast<int64_t>(result) % static_cast<int64_t>(right)`), THEN
         # modulo -- so 7.9 % 3 == 1 (7 % 3), not fmod(7.9, 3) == 1.9.
-        # Python's int() truncates toward zero like the C++ cast; math.fmod
-        # (not Python's `%`) then matches C's sign-of-dividend convention.
-        ib = int(b)
+        # values.gs1_int is that cast; math.fmod (not Python's `%`) then
+        # matches C's sign-of-dividend convention.
+        ib = gs1_int(b)
         if ib == 0:
             return 0.0
-        return math.fmod(int(a), ib)
+        return math.fmod(gs1_int(a), ib)
 
     @staticmethod
     def _eq(a, b):
         # ExpressionEquality (GS1Visitor.cpp): array/array is a real
         # element-wise vector compare; everything else -- including a
-        # string on either side -- coerces through gs1_num (DoublesAreSame,
-        # epsilon 0.0001, CommonTypes.h), so plain string content is never
-        # compared here (use strequals() for that).
+        # string on either side -- coerces through gs1_num and compares with
+        # values.doubles_are_same, so plain string content is never compared
+        # here (use strequals() for that).
         if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
             return list(a) == list(b)
-        return abs(gs1_num(a) - gs1_num(b)) < 0.0001
+        return doubles_are_same(gs1_num(a), gs1_num(b))
 
     def _compound(self, op, cur, value):
         base = op[0]
@@ -784,17 +785,21 @@ class Interpreter:
             indices = []
             for p in ref.parts:
                 if p.index:
-                    indices = [int(to_num(self.eval(e))) for e in p.index]
-                    break
+                    indices.extend(gs1_int(self.eval(e)) for e in p.index)
             return scope, key, indices, names
         names = [self._part_name(p) for p in ref.parts]
-        # Evaluate ALL indices on the indexed part (2D access like tiles[x,y]).
-        # The var store uses the first index; built-ins get the whole list.
+        # Evaluate ALL indices across ALL parts, in source order: both the
+        # 2D form on one part (`tiles[x,y]`) and the two-deep form spread
+        # over two (`npcs[3].save[1]` -> [3, 1]). Collecting only the first
+        # indexed part dropped the tail, so a Host saw npcs[n].save[0] and
+        # npcs[n].save[1] as the same reference -- which is exactly how
+        # classic Bomber tells its room controller (save[1]==13) from an
+        # arcade cabinet (save[0]==10). The var store still reads index 0,
+        # which is unchanged for every single-indexed-part reference.
         indices = []
         for p in ref.parts:
             if p.index:
-                indices = [int(to_num(self.eval(e))) for e in p.index]
-                break
+                indices.extend(gs1_int(self.eval(e)) for e in p.index)
         first = names[0]
         if first in NAMESPACES and len(names) > 1:
             return NAMESPACES[first], ".".join(names[1:]), indices, names
@@ -832,7 +837,7 @@ class Interpreter:
                 slots = self.ctx.vars.scopes["this"].setdefault("save", [0.0] * 10)
                 i = int(index)
                 if 0 <= i < 10:
-                    slots[i] = float(min(220, max(0, int(to_num(value)))))
+                    slots[i] = float(min(220, max(0, gs1_int(value))))
                 return
             self.ctx.vars.set(scope, key, value, index)
             return
@@ -1168,7 +1173,7 @@ _PURE = {
     # math
     "random": _f_random,
     "abs": _f1(abs),
-    "int": _f1(lambda x: float(int(x))),       # truncate toward zero
+    "int": _f1(lambda x: float(gs1_int(x))),   # truncate toward zero
     "sin": _f1(_sin),
     "cos": _f1(math.cos),
     "tan": _f1(math.tan),
@@ -1180,8 +1185,8 @@ _PURE = {
     "min": lambda self, a: min((to_num(x) for x in a), default=0.0),
     "getangle": lambda self, a: _getangle(a),
     "getdir": lambda self, a: _getdir(a),
-    "vecx": lambda self, a: _VECX[int(math.floor(to_num(a[0]) if a else 0)) % 4],
-    "vecy": lambda self, a: _VECY[int(math.floor(to_num(a[0]) if a else 0)) % 4],
+    "vecx": lambda self, a: _VECX[gs1_index(a[0] if a else 0) % 4],
+    "vecy": lambda self, a: _VECY[gs1_index(a[0] if a else 0) % 4],
     # strings
     "ascii": lambda self, a: _ascii(a),
     "keycode": lambda self, a: _keycode(a),

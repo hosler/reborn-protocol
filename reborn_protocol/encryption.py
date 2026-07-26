@@ -13,7 +13,7 @@ import struct
 import zlib
 import bz2
 import logging
-from typing import Tuple
+from typing import Optional, Tuple
 
 
 logger = logging.getLogger(__name__)
@@ -165,6 +165,51 @@ def compress_data(data: bytes) -> Tuple[bytes, int]:
         return bz2.compress(data), CompressionType.BZ2
     else:
         return zlib.compress(data), CompressionType.ZLIB
+
+
+class CompressionPolicy:
+    """
+    Which compression types a GEN_5 session is allowed to emit outbound.
+
+    The policy is part of the session's wire contract, not a local
+    optimisation: `limit_from_type` derives the encryption limit from the type
+    byte, so a peer that never expects bz2 must never be sent bz2.
+
+    Args:
+        name: Identifier for logging/debugging.
+        uncompressed_max: Payloads this size or smaller go out uncompressed.
+        zlib_max: Payloads larger than this switch to bz2. None means "zlib for
+            everything above uncompressed_max, never bz2".
+    """
+
+    __slots__ = ('name', 'uncompressed_max', 'zlib_max')
+
+    def __init__(self, name: str, uncompressed_max: int = 55,
+                 zlib_max: Optional[int] = 0x2000):
+        self.name = name
+        self.uncompressed_max = uncompressed_max
+        self.zlib_max = zlib_max
+
+    def compress(self, data: bytes) -> Tuple[bytes, int]:
+        """Compress `data` per this policy. Returns (data, compression_type)."""
+        if len(data) <= self.uncompressed_max:
+            return data, CompressionType.UNCOMPRESSED
+        if self.zlib_max is not None and len(data) > self.zlib_max:
+            return bz2.compress(data), CompressionType.BZ2
+        return zlib.compress(data), CompressionType.ZLIB
+
+    def __repr__(self) -> str:
+        return f"CompressionPolicy({self.name!r})"
+
+
+# Game-server session: matches compress_data() exactly (the historical default).
+GAME_COMPRESSION = CompressionPolicy('game')
+
+# Client -> list-server session: the same uncompressed/zlib split but no bz2
+# tier at all. pyReborn's list-server client has always chosen only
+# UNCOMPRESSED/ZLIB; the login and serverlist-request packets it sends are far
+# below the threshold, so this only matters as an explicit contract.
+LIST_SERVER_COMPRESSION = CompressionPolicy('list_server', zlib_max=None)
 
 
 def decompress_data(data: bytes, compression_type: int) -> bytes:

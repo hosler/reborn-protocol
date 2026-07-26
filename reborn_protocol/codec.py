@@ -18,6 +18,8 @@ import zlib
 from typing import Optional, List, Tuple
 
 from .encryption import (
+    GAME_COMPRESSION,
+    CompressionPolicy,
     CompressionType,
     RebornEncryption,
     compress_data,
@@ -51,11 +53,16 @@ class PacketReader:
     Utility for reading packet data with Reborn protocol encodings.
 
     All G-type values are encoded with +32 offset for printable ASCII.
+
+    `encoding` is the single-byte codepage used for text. The game-server
+    session's default is latin-1; the list-server session's text is cp1252
+    (0x92 is a right single quote there, not U+0092).
     """
 
-    def __init__(self, data: bytes):
+    def __init__(self, data: bytes, encoding: str = 'latin-1'):
         self.data = data
         self.pos = 0
+        self.encoding = encoding
 
     def read_byte(self) -> int:
         """Read a raw byte."""
@@ -146,7 +153,7 @@ class PacketReader:
             length = len(self.data) - self.pos
         data = self.data[self.pos:self.pos + length]
         self.pos += length
-        return data.decode('latin-1', errors='replace')
+        return data.decode(self.encoding, errors='replace')
 
     def read_gstring(self) -> str:
         """Read a length-prefixed string (GCHAR length prefix)."""
@@ -407,10 +414,16 @@ class Gen5Codec:
 
     Handles packet encryption/decryption with dynamic compression
     selection based on data size. Used by pyReborn client.
+
+    `compression` names the outbound compression policy; it defaults to the
+    game-server one. pyReborn's list-server session passes
+    LIST_SERVER_COMPRESSION, which never emits bz2.
     """
 
-    def __init__(self, encryption_key: int = 0):
+    def __init__(self, encryption_key: int = 0,
+                 compression: CompressionPolicy = GAME_COMPRESSION):
         self.encryption_key = encryption_key
+        self.compression = compression
         self.in_codec = RebornEncryption(encryption_key)
         self.out_codec = RebornEncryption(encryption_key)
 
@@ -431,7 +444,7 @@ class Gen5Codec:
             Length-prefixed encrypted packet
         """
         # Choose compression based on size
-        compressed, compression_type = compress_data(data)
+        compressed, compression_type = self.compression.compress(data)
         if len(compressed) + 1 > MAX_PACKET_LEN:
             logger.warning("dropping oversize packet bundle (%d bytes > %d)",
                            len(compressed) + 1, MAX_PACKET_LEN)

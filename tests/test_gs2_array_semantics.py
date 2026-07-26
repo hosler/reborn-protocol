@@ -201,14 +201,19 @@ def test_list_index_ops_use_epsilon_floor():
     assert arr == ["a", "q", "z"]
 
 
-def test_subarray_keeps_plain_truncation():
-    """subArray is the documented exception: its asm carries no
-    DOUBLE_00402440, so 1.9999 still means "start at 1"."""
+def test_subarray_floors_both_bounds_with_epsilon():
+    """subArray is NOT an exception to floorScriptIndex.
+
+    An earlier comment claimed its asm carried no DOUBLE_00402440 and the
+    code truncated instead; the decompiled interpreter refutes it --
+    subArray() floors BOTH bounds, TScriptMachine.cpp:1844 (length) and
+    :1848 (start). So 1.9999999999 means "start at 2", not 1.
+    """
     vm, frame = _vm_frame()
     # stack [length, start, obj]
     frame.stack.extend([2, 1.9999999999, ["a", "b", "c", "d"]])
     vm._op_obj_subarray(frame, None)
-    assert frame.stack.pop() == ["b", "c"]
+    assert frame.stack.pop() == ["c", "d"]
 
 
 # --- object vs null: regression for the Login serverlist outage -------------

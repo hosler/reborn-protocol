@@ -16,6 +16,7 @@ from .container import GS2Container, FunctionEntry, GS2ContainerError, parse_con
 from .disasm import Instruction, Operand, GS2DecodeError, decode, format_listing
 from .values import (
     GS2_NULL, GS2Object, LValue, VarRef, to_num, to_str, to_bool, gs2_eq,
+    casefold,
 )
 from .vm import (
     GS2VM, GS2Host, GS2ScriptFunction, NOT_HANDLED, array_index, printf_format,
@@ -26,7 +27,7 @@ __all__ = [
     "GS2Container", "FunctionEntry", "GS2ContainerError", "parse_container",
     "Instruction", "Operand", "GS2DecodeError", "decode", "format_listing",
     "GS2_NULL", "GS2Object", "LValue", "VarRef", "to_num", "to_str",
-    "to_bool", "gs2_eq",
+    "to_bool", "gs2_eq", "casefold",
     "GS2VM", "GS2Host", "GS2ScriptFunction", "NOT_HANDLED", "array_index",
     "printf_format",
 ]

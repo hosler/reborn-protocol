@@ -1,10 +1,21 @@
-"""GS2 runtime values and coercion.
+"""GS2 runtime values and coercion -- the ONE home for GS2's coercion policy.
 
 GS2 is duck-typed: numbers (float), strings, arrays (Python lists, reference
 semantics), and objects (GS2Object, case-insensitive member dict). `to_num` /
 `to_bool` are shared with the sibling gs1.values module (same engine family,
 same host); number->string formatting and the comparison rules are NOT --
 they come from the reversed official interpreter and differ from GS1's.
+
+Every GS2 coercion rule lives here so a new call site picks a named rule
+instead of re-deriving one (`gs1.values`' module docstring tabulates the two
+engines' rules side by side; they are deliberately different and must not be
+unified):
+
+  number -> string   fmt_num             float32 zero test, then "%.9f"
+  number -> int      to_int32            truncate, then the int32 clamp
+  number -> index    array_index         floor(v + SCRIPT_EPSILON)
+  compare tolerance  SCRIPT_EPSILON      1e-4, on EVERY relational op
+  case folding       casefold / casecmp  ASCII-only (C strcasecmp)
 
 Comparison: every relational opcode (OP_EQ/NEQ/LT/GT/LTE/GTE, and also
 OP_MIN/OP_MAX/OP_OBJ_COMPARE) funnels through one 3-way TScriptMachine::
@@ -29,7 +40,7 @@ GS2_NULL is the object entry whose pointer is nullptr -- what OP_TYPE_NULL
 pushes (TScriptMachine.cpp:2605-2609). It is deliberately NOT `None`: None
 means "the host has no value here / this variable was never set", which the
 official machine resolves to Number 0.0 (resolve() -> TScriptStackEntry.cpp:
-228-229). Conflating the two is what broke the Login server: see gs2_compare.
+228-229).
 
 Reference kinds pushed by the bytecode:
 - VarRef(name): pushed by OP_TYPE_VAR; resolved against the scope chain
@@ -41,6 +52,7 @@ Reference kinds pushed by the bytecode:
 """
 from __future__ import annotations
 
+import math
 import struct
 from typing import Any, Dict, Iterator, Optional
 
@@ -48,10 +60,66 @@ from ..gs1.values import to_num, to_bool  # noqa: F401  (shared coercions)
 
 #: The machine's universal float tolerance, DOUBLE_00402440 = 0.0001
 #: (Preagonal/FourPlay/quattroplay/src/TInitStatics.cpp:1266). The same
-#: constant is the array-index epsilon (vm.array_index), the number->string
+#: constant is the array-index epsilon (array_index), the number->string
 #: "print as 0" threshold (fmt_num) and the comparison tolerance
 #: (compareNumberValues, TScriptMachine.cpp:36-43).
 SCRIPT_EPSILON = 1e-4
+
+#: array_index's epsilon, spelled separately because the VM re-exports it
+#: under this name; it IS SCRIPT_EPSILON.
+ARRAY_INDEX_EPSILON = SCRIPT_EPSILON
+
+#: the official machine's own array-ALLOCATION cap. initArray (OP_ARRAY_NEW),
+#: setArray (OP_SETARRAY) and expandArray (OP_ARRAY_NEW_MULTIDIM) all clamp
+#: the requested size into [0, 10000] before allocating -- FourPlay's
+#: decompiled interpreter, Preagonal/FourPlay/quattroplay/src/
+#: TScriptMachine.cpp: setArray :1352 (clamp :1374-1375), initArray :1400
+#: (clamp :1410), expandArray :1637 (clamp :1655-1656). `new[50000]`
+#: therefore yields 10000 elements on the real client, not 50000.
+MAX_ARRAY_SIZE = 0x2710
+
+
+def array_index(value: Any) -> int:
+    """``floor(v + 0.0001)``, NOT truncation -- floorScriptIndex,
+    src/TScriptMachine.cpp:60-67.
+
+    Used by every index-taking machine method: array cells,
+    initArray/setArray/expandArray, insert/delete/replace, charAt,
+    subString, subArray, foreach's index, OP_INT, OP_BWI, vecx/vecy.
+    The epsilon matters: an index computed as ``(a/b)*c`` landing on
+    2.99999999996 reads cell 3 on the real client, cell 2 under ``int()``.
+    """
+    try:
+        return math.floor(to_num(value) + ARRAY_INDEX_EPSILON)
+    except (ValueError, OverflowError):  # NaN / inf
+        return 0
+
+
+def array_size(value: Any) -> int:
+    """Official allocation-size conversion: array_index() clamped into
+    [0, MAX_ARRAY_SIZE] exactly as initArray/setArray/expandArray do."""
+    return max(0, min(array_index(value), MAX_ARRAY_SIZE))
+
+
+def to_int32(value: Any) -> int:
+    """C `static_cast<int32_t>(double)`: truncate toward zero, and yield
+    INT_MIN when the value does not fit (what cvttsd2si does on x86-64, and
+    what every bitwise opcode in the official machine relies on --
+    src/TScriptMachine.cpp:3098-3111 casts both operands that way)."""
+    try:
+        n = math.trunc(to_num(value))
+    except (ValueError, OverflowError):  # NaN / inf
+        return -0x80000000
+    if not -0x80000000 <= n < 0x80000000:
+        return -0x80000000
+    return n
+
+
+def wrap_int32(n: int) -> int:
+    """Truncate an int back into the int32 range, as the machine's bitwise
+    results do (OP_BW_SHL overflowing past bit 31 wraps, it does not clamp)."""
+    n &= 0xFFFFFFFF
+    return n - 0x100000000 if n >= 0x80000000 else n
 
 
 def _f32(x: float) -> float:
@@ -66,9 +134,8 @@ def _f32(x: float) -> float:
 def fmt_num(x: float) -> str:
     """Format a number the way the official machine prints it.
 
-    TScriptStackEntry::switchTypeString (quattroplay asm/TScriptStackEntry/
-    _ZN17TScriptStackEntry16switchTypeStringEP14TScriptMachineb.s_decomped:
-    37-58) takes the |(float)value| < 0.0001 shortcut and emits the literal
+    TScriptStackEntry::switchTypeString (src/TScriptStackEntry.cpp:363-380)
+    takes the |(float)value| < 0.0001 shortcut (:376) and emits the literal
     string "0"; otherwise it hands the *double* to TString::operator<<(double)
     -> TString::adddouble(v, width=0, precision=-1, ...) (src/TString.cpp:
     1497-1501 and 1139-1174), which is `snprintf("%.9f")` with trailing '0's
@@ -102,9 +169,6 @@ class _GS2Null:
     They agree against numbers (a nullptr formats as 0.0 through
     objectPointerAsDouble) and disagree against strings and objects, which is
     where the interesting branches live.
-
-    Falsy, numerically zero, stringifies empty -- so every non-comparison use
-    behaves like the None it replaces.
     """
 
     __slots__ = ()
@@ -223,18 +287,11 @@ class GS2Object:
     NPCs, GUI controls) without the VM knowing the difference.
     """
 
-    #: `script_vms` lists the GS2VMs this object serves as `this` for, oldest
-    #: first (maintained by GS2VM.this's setter). It is what makes
-    #: cross-script method calls work: a script that publishes itself with
-    #: `plfunc = this;` is reached by others as `plfunc.SomePublicFunction()`,
-    #: and the VM resolves that through this back-reference. Empty on every
-    #: other object.
-    #:
-    #: It is a LIST because one this-object legitimately serves several VMs:
-    #: a re-sent script reuses the previous VM's this (to keep state), and a
-    #: joined class instance shares its joiner's. Resolution walks it newest
-    #: first, so the freshest script wins and a joined class that does not
-    #: declare the name falls through to the script that joined it.
+    #: `script_vms` lists the GS2VMs this object serves as `this` for, enabling
+    #: cross-script calls through object references. It is a list because a
+    #: re-sent script reuses the previous VM's `this`, while a joined class
+    #: shares its joiner's. Resolution walks newest-first so the freshest
+    #: script wins and missing joined-class methods fall through to the joiner.
     __slots__ = ("_members", "name", "script_vms")
 
     def __init__(self, name: str = ""):
@@ -268,12 +325,25 @@ class GS2Object:
 _ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 
 
-def _casecmp(a: str, b: str) -> int:
-    """TString::compareIgnoreCase == strcasecmp (src/TString.cpp:1001-1011):
-    byte-wise compare after ASCII-only case folding (NOT str.casefold(),
-    which also folds non-ASCII)."""
-    la, lb = a.translate(_ASCII_LOWER), b.translate(_ASCII_LOWER)
+def casefold(s: str) -> str:
+    """GS2's case-folding policy: ASCII-ONLY lowering.
+
+    Every case-insensitive string operation in the machine bottoms out in C
+    `strcasecmp`/`strncasecmp` (TString::compareIgnoreCase src/TString.cpp:
+    1001-1011, TString::strncasecmp :27-29), which folds bytes 'A'-'Z' and
+    nothing else. Python's `str.casefold()` is NOT a substitute: it also folds
+    non-ASCII and can even change length ('ss'.casefold() == 'ß'.casefold()),
+    so a script comparing user/level text would take a branch the real client
+    does not. Use this for every GS2 case-insensitive compare, prefix/suffix
+    test and sort key."""
+    return s.translate(_ASCII_LOWER)
+
+
+def casecmp(a: str, b: str) -> int:
+    """3-way strcasecmp over `casefold`ed operands."""
+    la, lb = casefold(a), casefold(b)
     return -1 if la < lb else (1 if la > lb else 0)
+
 
 
 def _numcmp(left: float, right: float) -> int:
@@ -287,7 +357,7 @@ def _numcmp(left: float, right: float) -> int:
 
 
 #: lattice cells that survive TScriptStackEntry::resolve() -- see the module
-#: docstring. Ordered so the compare table below reads like the C++ switch.
+#: docstring.
 _NUMBER, _STRING, _OBJECT = 0, 1, 2
 
 
@@ -327,13 +397,9 @@ def gs2_compare(a: Any, b: Any) -> int:
                        pointer is nullptr              (:1452, :1476)
       object/number -> compareNumberValues(pointer)    (:1465, :1480)
 
-    The object/number row is the one that matters most and the one we used to
-    get wrong. `findweapon(x) != null` is OBJECT vs OBJECT when the weapon
-    exists (two different pointers -> unequal, the branch is taken) and
-    NUMBER-0 vs OBJECT-nullptr when it does not (both 0.0 -> equal). A version
-    of this function that ran objects through to_num() saw 0.0 on both sides
-    and reported a found weapon EQUAL to null, so Login's -Rescripted/IRC/
-    Login3 skipped initServerlist() and built no GUI at all, with no error.
+    The object/number row is load-bearing: findweapon(x) != null is OBJECT/OBJECT
+    when found and NUMBER-0 vs nullptr when not. Routing objects through to_num()
+    makes both 0.0 and silently kills Login's initServerlist().
 
     One deliberate deviation: array/array is elementwise, not a pointer
     compare. Arrays really are objects here, so the official rule would make
@@ -362,10 +428,10 @@ def gs2_compare(a: Any, b: Any) -> int:
             # returns 0 rather than dereferencing it -- `null == "anything"`
             if ptr == 0:
                 return 0
-            return flip * _casecmp(getattr(obj, "name", "") or "", other)
+            return flip * casecmp(getattr(obj, "name", "") or "", other)
         return flip * _numcmp(float(ptr), to_num(other))
     if ka == _STRING and kb == _STRING:
-        return _casecmp(a, b)
+        return casecmp(a, b)
     return _numcmp(to_num(a), to_num(b))
 
 

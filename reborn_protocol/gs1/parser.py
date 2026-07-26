@@ -48,13 +48,32 @@ class Parser:
         self.errors: list[ParseError] = []
 
     def _synchronize(self):
-        """Panic-mode recovery: skip to the next ';' (consumed) or '}'/EOF."""
+        """Panic-mode recovery: skip to the next ';' (consumed) or '}'/EOF.
+
+        A '{' reached before that terminator belongs to the statement that
+        just failed, so the whole balanced block is skipped with it. Stopping
+        at the ';' inside instead leaves the '{' dangling: every statement of
+        the body is then re-parsed at the ENCLOSING level and runs
+        unconditionally, and the block's own '}' surfaces as a second, bogus
+        error. Live Bomber (bomblobby.nw NPCs 4 and 50, captured 2026-07-26)
+        is the proof - both arrive with a stray '*' where the server's
+        comment stripper ate the '/' of a '/*', and the old recovery promoted
+        two deliberately disabled effect blocks (seteffect + 55 showimg + a
+        self-rearming `timeout = 0.05`) to top level.
+        """
+        depth = 0
         while not self.at(EOF):
             t = self.next().type
-            if t == "END":
-                return
-            if t == "TOKEN_BRACE_RIGHT":
-                self.i -= 1  # let the enclosing block consume it
+            if t == "TOKEN_BRACE_LEFT":
+                depth += 1
+            elif t == "TOKEN_BRACE_RIGHT":
+                if depth == 0:
+                    self.i -= 1  # let the enclosing block consume it
+                    return
+                depth -= 1
+                if depth == 0:
+                    return
+            elif t == "END" and depth == 0:
                 return
 
     # -- token helpers -----------------------------------------------------
@@ -344,8 +363,21 @@ class Parser:
         node = self.parse_exponent()
         mark = self.i
         values = [node]
-        while self.accept("TOKEN_COMMA"):
-            values.append(self.parse_exponent())
+        try:
+            while self.accept("TOKEN_COMMA"):
+                values.append(self.parse_exponent())
+        except ParseError:
+            # Not an 'in' list: the speculation ran off the end of whatever
+            # those commas really belonged to. An array literal with an empty
+            # slot (live Bomber room0.nw's furniture catalog writes
+            # `this.off={,-1,};`) ends `,}`, so parse_exponent lands on the
+            # '}'. Letting that escape put the whole statement into panic
+            # recovery, which backs onto the '}' and hands it to parse_block as
+            # the ENCLOSING block's brace -- truncating the if-body and
+            # re-parsing its remainder at top level, unconditionally. Rewind
+            # like any other failed speculation.
+            self.i = mark
+            return node
         if self.at("OP_IN"):
             self.next()
             if self.at("TOKEN_PIPE", "OP_LESS"):
