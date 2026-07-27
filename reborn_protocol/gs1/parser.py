@@ -106,6 +106,14 @@ class Parser:
         while not self.at(EOF):
             if self.accept("END"):
                 continue
+            if self.accept("TOKEN_BRACE_RIGHT"):
+                # A stray unmatched '}' at TOP level closes nothing and shifts
+                # nothing — skip it silently like the official client (live
+                # GTA's -System3 ends in one extra '}'; erroring here dropped
+                # no real statement but cried wolf every session). Mid-script
+                # brace damage still surfaces: the '{'-half of a broken block
+                # fails inside parse_block, which reports it.
+                continue
             before = self.i
             try:
                 body.append(self.parse_statement())
@@ -164,6 +172,14 @@ class Parser:
             kind = {"KW_RETURN": "return", "KW_BREAK": "break",
                     "KW_CONTINUE": "continue"}[t]
             self.next()
+            # tolerate the call-form `break();` / `continue();` — live GTA
+            # (-magic/Effect, 14 statements) writes them GS2-style and the
+            # official client accepts it
+            if kind != "return" and self.at("TOKEN_PAREN_LEFT"):
+                save = self.i
+                self.next()
+                if not self.accept("TOKEN_PAREN_RIGHT"):
+                    self.i = save
             self._end_statement()
             return ast.Flow(kind)
         if t == "COMMAND":
@@ -191,10 +207,20 @@ class Parser:
         self.eat("TOKEN_PAREN_RIGHT")
         then = self.parse_block()
         els = None
+        # Tolerate stray ';' between the then-branch and its else: live GTA
+        # ships `if (c) stmt;; else stmt;` (weapon *Quiver's scroll arrows,
+        # twice) and the official client accepts it — rejecting the else
+        # dropped the whole branch. Restore when no else follows so the
+        # terminator stays for the enclosing context.
+        saved = self.i
+        while self.accept("END"):
+            pass
         if self.accept("KW_ELSEIF"):
             els = [self._parse_if_tail()]
         elif self.accept("KW_ELSE"):
             els = self.parse_block()
+        else:
+            self.i = saved
         return ast.If(cond, then, els)
 
     def parse_for(self):
@@ -265,6 +291,12 @@ class Parser:
             value = self.parse_expression()
             node = ast.Assign(target, op, value)
             if not no_terminator:
+                # An array-literal assignment is self-terminating at its '}',
+                # like a block — live GTA's -BarrelRide writes
+                # `this.x={1,0,...}` with no ';' (six of them) and the
+                # official client accepts it.
+                if isinstance(value, ast.ArrayLit) and not self.at("END"):
+                    return node
                 self._end_statement()
             return node
         # userFunctionStatement: name '(' ')'

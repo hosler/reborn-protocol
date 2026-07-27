@@ -117,6 +117,13 @@ class _State:
     arguments: str
     pop_mode: int
     comma_pop: bool = True
+    # True when this state belongs to a '#X(...)' messagecode rather than a
+    # function call. String-arg paren balancing (see _consume_string_run) is
+    # suppressed for messagecodes: gs2emu's engine ends a messagecode arg at
+    # the FIRST ')' regardless of nesting (oracle-locked, e.g. the
+    # `#E(base64encode(#s(...)))` corpus case keeps a literal ')' in the
+    # result), while function args balance plain parens.
+    is_messagecode: bool = False
 
 
 class LexError(Exception):
@@ -155,7 +162,13 @@ class Lexer:
         # '{...}' set/array literals inside command/messagecode arguments
         # (`showani2 ...,(this.z in {.75,1.25}),...`), so track literal depth
         # here and treat ',' / '}' as plain punctuation while inside one.
+        # Scoped per pushed state like brace_count (array_lit_stack below):
+        # a FUNCTION call nested inside the literal (`showpoly this.a,
+        # {random(...),...}` — GTA's Poly Trail) otherwise sees the OUTER
+        # literal depth at its own ')' and never pops its state, killing the
+        # rest of the script at the lexer.
         self.array_lit_depth = 0
+        self.array_lit_stack: list[int] = []
         self.before: deque[Token] = deque()
         self.after: deque[Token] = deque()
         self.out: list[Token] = []
@@ -177,8 +190,9 @@ class Lexer:
         st = self.states[-1] if self.states else None
         return bool(st and st.arguments and st.arguments[0] == "(")
 
-    def push_command(self, arguments: str):
-        self.states.append(_State(arguments, POP_COMMAND, True))
+    def push_command(self, arguments: str, is_messagecode: bool = False):
+        self.states.append(_State(arguments, POP_COMMAND, True,
+                                  is_messagecode))
         self.mode_stack.append(self.mode)  # pushMode(dummy) saves current mode
         # brace_count counts *plain* grouping parens still open in the
         # current command/function/messagecode's own argument expression, so
@@ -193,6 +207,8 @@ class Lexer:
         # terminating the inner call.
         self.brace_stack.append(self.brace_count)
         self.brace_count = 0
+        self.array_lit_stack.append(self.array_lit_depth)
+        self.array_lit_depth = 0
         self.pop_next_mode()
 
     def push_array_access(self):
@@ -200,6 +216,8 @@ class Lexer:
         self.mode_stack.append(self.mode)
         self.brace_stack.append(self.brace_count)
         self.brace_count = 0
+        self.array_lit_stack.append(self.array_lit_depth)
+        self.array_lit_depth = 0
         self.pop_next_mode()
 
     def pop_next_mode(self, terminate_early=False):
@@ -211,6 +229,7 @@ class Lexer:
         if st.arguments == "":
             self.mode = self.mode_stack.pop()
             self.brace_count = self.brace_stack.pop()
+            self.array_lit_depth = self.array_lit_stack.pop()
             self.states.pop()
             return
         c = st.arguments[0]
@@ -311,7 +330,7 @@ class Lexer:
             # simple code: takes an optional (param) only if '(' follows
             args = "(P)" if nxt == "(" else ""
         if args:
-            self.push_command(args)
+            self.push_command(args, is_messagecode=True)
         return Token(MESSAGECODE, code, m.start())
 
     def _match_hash_escape(self, token_type):
@@ -401,9 +420,13 @@ class Lexer:
             mc = self._match_messagecode()
             if mc:
                 return mc
-        if c == ":" and not self._has_pending_ternary():
+        if (c == ":" and not self._has_pending_ternary()
+                and not self.text.startswith(":=", self.pos)):
             # Outside a pending ternary, ':' joins a classic free-form flag
-            # operand (for example `if (!Spar:xyz)`).
+            # operand (for example `if (!Spar:xyz)`). ':=' is exempt: it is
+            # the alternate assignment operator (OPS2 table) — live GTA's
+            # Space Storm weapon is written entirely with it, and splitting
+            # it here made IDENTIFIER(':') kill every statement.
             self.pos += 1
             return Token(IDENTIFIER, ":", self.pos - 1)
         if c == ";":
@@ -431,13 +454,20 @@ class Lexer:
             if c == "[":
                 self.push_array_access()
             return Token(PUNCT[c], c, self.pos - 1)
-        raise LexError(f"unexpected char {c!r}", self.pos, self._line)
+        # Junk char at statement level: emit it as an IDENTIFIER so parser
+        # recovery drops ONE statement instead of the LexError killing the
+        # whole script (live GTA's -GC Droppables2 has a literal '\' typo
+        # in an array line; the official client still runs the rest).
+        self.pos += 1
+        return Token(IDENTIFIER, c, self.pos - 1)
 
     def _default_word(self):
         word = self._scan_word()
         if word is None:
-            raise LexError(f"unexpected char {self.text[self.pos]!r}",
-                           self.pos, self._line)
+            # non-ASCII letter etc. — contain to one statement (see the junk
+            # branch at the end of _mode_DEFAULT)
+            self.pos += 1
+            return Token(IDENTIFIER, self.text[self.pos - 1], self.pos - 1)
         start = self.pos
         # after '.', a word is a property name, never a command/keyword/function
         # (e.g. this.message, this.set) — commands are only matched at stmt start
@@ -488,9 +518,20 @@ class Lexer:
     def _expr_word(self):
         word = self._scan_word()
         if word is None:  # non-ASCII letter etc. (invalid in code, as in C++)
-            raise LexError(f"unexpected char {self.text[self.pos]!r} in expr",
-                           self.pos, self._line)
+            # contained like _mode_DEFAULT's junk branch, not a fatal LexError
+            self.pos += 1
+            return Token(IDENTIFIER, self.text[self.pos - 1], self.pos - 1)
         start = self.pos
+        # after '.', a word is a property name, never a function — same rule
+        # the statement-level scanner applies. Without it a member that
+        # happens to share a builtin's name (GTA's `this.sin`/`this.cos`
+        # orbit counters, Staff Tool/Grog) entered P1 "expect '('" mode and
+        # the whole script died at the lexer.
+        if self.out and self.out[-1].type == "TOKEN_PERIOD":
+            self.pos += len(word)
+            if word in ("true", "false"):
+                return Token(LITERAL, word, start)
+            return Token(IDENTIFIER, word, start)
         if word in FUNCTIONS:
             self.pos += len(word)
             self.push_command(FUNCTIONS[word])
@@ -586,7 +627,9 @@ class Lexer:
             mc = self._match_messagecode()
             if mc:
                 return mc
-        if c == ":" and not self._has_pending_ternary():
+        if (c == ":" and not self._has_pending_ternary()
+                and not self.text.startswith(":=", self.pos)):
+            # ':=' exempt as in _mode_DEFAULT — it's the alternate assignment
             self.pos += 1
             return Token(IDENTIFIER, ":", self.pos - 1)
         if c.isalpha() or c == "_":
@@ -603,7 +646,10 @@ class Lexer:
         if c in PUNCT:
             self.pos += 1
             return Token(PUNCT[c], c, self.pos - 1)
-        raise LexError(f"unexpected char {c!r} in expr", self.pos, self._line)
+        # junk char in an expression: same one-statement containment as
+        # _mode_DEFAULT (parser recovery), not a whole-script LexError
+        self.pos += 1
+        return Token(IDENTIFIER, c, self.pos - 1)
 
     def _mode_V(self):
         # variable target: identifier / array access / messagecode, comma & end pop
@@ -695,7 +741,8 @@ class Lexer:
             self.pop_next_mode(True)
             self.pos += 1
             return Token("TOKEN_BRACE_RIGHT", "}", self.pos - 1)
-        if c == ")" and not raw and self._can_func_pop():
+        if (c == ")" and not raw and self._can_func_pop()
+                and (self.brace_count == 0 or self.states[-1].is_messagecode)):
             self.pop_next_mode(True)
             self.pos += 1
             return Token("TOKEN_PAREN_RIGHT", ")", self.pos - 1)
@@ -723,6 +770,14 @@ class Lexer:
         comma_pop = self._can_comma_pop()
         cmd_pop = self._can_cmd_pop()
         func_pop = self._can_func_pop()
+        # Balance plain parens inside a FUNCTION's string arg: live GTA's
+        # Vampire Bite passes the literal `(paused)` to strcontains, and
+        # popping at its inner ')' left a stray ')' that cut the whole
+        # if-condition short. Messagecode args keep the first-')'-pops quirk
+        # (gs2emu oracle-locked — see _State.is_messagecode). brace_count is
+        # per-state, so the depth belongs to this call's own argument text.
+        balance = (func_pop and not raw and self.states
+                   and not self.states[-1].is_messagecode)
         while self.pos < n:
             ch = t[self.pos]
             if (not raw and ch == "#") or (raw and t.startswith("##", self.pos)):
@@ -731,10 +786,12 @@ class Lexer:
                 break
             if ch == ";" and cmd_pop:
                 break
-            if ch == ")" and not raw and func_pop and not comma_pop:
-                break
             if ch == ")" and not raw and func_pop:
-                break
+                if not balance or self.brace_count == 0:
+                    break
+                self.brace_count -= 1
+            elif ch == "(" and balance:
+                self.brace_count += 1
             if ch == "," and comma_pop:
                 break
             self.pos += 1
