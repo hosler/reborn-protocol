@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 import math
 import random as _random
 
@@ -24,6 +25,8 @@ from .runtime import (Context, Host, MemoryHost, VarStore, UNSET, NAMESPACES,
 from .values import (to_num, to_str, fmt_num,
                      gs1_num, gs1_truthy, is_double_zero,
                      gs1_int, gs1_index, doubles_are_same)
+
+logger = logging.getLogger(__name__)
 
 # commands the interpreter handles itself (manipulate the var store)
 _VAR_COMMANDS = {
@@ -139,6 +142,11 @@ class Interpreter:
                 self.exec(stmt)
             except (BreakSignal, ContinueSignal, ReturnSignal):
                 pass  # stray control-flow outside a loop is a no-op
+        try:
+            for _ in self._fire_event_function(event):
+                pass
+        except (BreakSignal, ContinueSignal, ReturnSignal):
+            pass
 
     def run_event_resumable(self, program: ast.Program, event: str) -> "ResumableExecution":
         """Opt-in entry point for hosts that want real suspend/resume `sleep`
@@ -236,7 +244,15 @@ class Interpreter:
             finally:
                 self.ctx.this_obj = prev
         elif t == "UserCall":
-            yield from self._gcall_user(node.name)
+            if node.name in self.ctx.functions:
+                yield from self._gcall_user(
+                    node.name, [self.eval(a) for a in node.args])
+            else:
+                # statement-form call to a non-user function (era writes
+                # builtins call-style: `setTimer(0.1);`) — route through the
+                # expression dispatch (pure table / host) instead of
+                # silently doing nothing.
+                self._ex_Call(ast.Call(node.name, node.args))
         elif t == "Command" and node.name == "sleep":
             secs = to_num(self.eval(node.args[0])) if node.args else 0.0
             if self._coro:
@@ -251,19 +267,63 @@ class Interpreter:
                 raise RuntimeError(f"cannot execute node {t}")
             m(node)
 
-    def _gcall_user(self, name):
+    def _gcall_user(self, name, args=None):
         fn = self.ctx.functions.get(name)
         if fn is None:
             return
         if self._depth >= _MAX_CALL_DEPTH:
             raise RuntimeError("GS1 max call depth exceeded")
         self._depth += 1
+        # Era new-GS1 parameters (ast.FuncDef.params): classic GS1 has no
+        # local scope, so bind them as bare vars for the duration of the
+        # call and restore/unset afterwards (nested calls shadow correctly).
+        params = getattr(fn, "params", None) or []
+        saved = []
+        if params:
+            args = args or []
+            store = self.ctx.vars
+            for i, p in enumerate(params):
+                saved.append((p, store.get(None, p)))
+                store.set(None, p, args[i] if i < len(args) else 0.0)
         try:
             yield from self._gblock(fn.body)
         except ReturnSignal:
             pass
         finally:
+            for p, old in saved:
+                if old is UNSET:
+                    self.ctx.vars.unset(None, p)
+                else:
+                    self.ctx.vars.set(None, p, old)
             self._depth -= 1
+
+    def _fire_event_function(self, event):
+        """GS2-convention event FUNCTIONS in era new-GS1: `function
+        onTimeout()` / `onPlayerEnters()` / `onActionX(a,b)` fire on their
+        event — era 2006's -System/-BulletSystem clientside is written
+        entirely this way (the classic flag-block form has no function
+        names, so this cannot double-fire it). Name match is
+        case-insensitive like every GS1 name; parameters bind from #p(n)
+        (the keypressed/actionprojectile argument channel)."""
+        if not event:
+            return
+        want = ("on" + event).lower()
+        fname = None
+        for k in self.ctx.functions:
+            if k.lower() == want:
+                fname = k
+                break
+        if fname is None:
+            return
+        fn = self.ctx.functions[fname]
+        args = []
+        for i in range(len(getattr(fn, "params", ()) or ())):
+            try:
+                args.append(self._eval_messagecode(
+                    ast.MessageCode("#p", [ast.Num(float(i))])))
+            except Exception:
+                args.append(0.0)
+        yield from self._gcall_user(fname, args)
 
     def iter_event(self, program: ast.Program, event: str):
         """Coroutine entry: run an event as a generator that yields sleep-seconds
@@ -281,6 +341,10 @@ class Interpreter:
                 yield from self._gx(stmt)
             except (BreakSignal, ContinueSignal, ReturnSignal):
                 pass  # stray control-flow outside a loop is a no-op
+        try:
+            yield from self._fire_event_function(event)
+        except (BreakSignal, ContinueSignal, ReturnSignal):
+            pass
 
     def _st_ExprStmt(self, node):
         if node.expr is not None:
@@ -307,8 +371,11 @@ class Interpreter:
             # resumable sleep pending on this ctx. See Context.sleep_cancelled.
             self.ctx.sleep_cancelled = True
         if node.op == "=" and not isinstance(value, (list, bool)):
-            # Plain assignment is numeric; text requires setstring.
-            value = to_num(value)
+            # Plain assignment is numeric; text requires setstring. Exception:
+            # an explicit `@` concat is era new-GS1 and its result is TEXT
+            # (`client.rupees = "$" @ player.rupees;` must not become 0).
+            if not (isinstance(node.value, ast.BinOp) and node.value.op == "@"):
+                value = to_num(value)
         self.set_ref(node.target, value)
 
     def _is_bare_timeout(self, ref):
@@ -457,6 +524,14 @@ class Interpreter:
         if m is None:
             raise RuntimeError(f"cannot evaluate node {type(node).__name__}")
         return m(node)
+
+    def _ex_Assign(self, node):
+        # Assignment in expression position exists only as the desugaring of
+        # era's chained `a = b = false;` (parser nests the tail as the value
+        # expression). Perform it and hand back the stored value.
+        self._st_Assign(node)
+        v = self.get_ref(node.target)
+        return 0.0 if v is UNSET_VAL else v
 
     def _ex_Num(self, node):
         return node.value
@@ -652,6 +727,11 @@ class Interpreter:
         # here (GameValue::getCopy<double> ignores text) -- `3 + this.s` where
         # this.s holds "25" is 3, not 28. String content compares go through
         # strequals()/strcontains(), not these operators.
+        if op == "@":
+            # era new-GS1 borrows GS2's string concat; number formatting
+            # follows to_str (GS2 "%.9f"-settled repr not applicable here —
+            # era only concats onto text like "$" @ player.rupees).
+            return to_str(a) + to_str(b)
         if op == "+":
             return gs1_num(a) + gs1_num(b)
         if op == "-":
@@ -729,18 +809,95 @@ class Interpreter:
     def _ex_Call(self, node):
         name = node.name
         if name in self.ctx.functions:
-            return self._call_user(name)
+            return self._call_user(name, [self.eval(a) for a in node.args])
+        if name.lower() == "settimer":
+            # era/GS2 spelling of the classic `timeout = N;` — reuse the
+            # assignment path so the cancel rule (timeout <= 0.0001
+            # deactivates) and the hosts' timeout var hook both apply.
+            val = to_num(self.eval(node.args[0])) if node.args else 0.0
+            self._st_Assign(ast.Assign(
+                ast.VarRef([ast.PathPart("timeout", [], [])]), "=",
+                ast.Num(val)))
+            return 0.0
         fn = _PURE.get(name)
         if fn is not None:
             return fn(self, [self.eval(a) for a in node.args])
         v = self.ctx.host.call_function(name, [self.eval(a) for a in node.args], self.ctx)
         return 0.0 if v is UNSET else v
 
-    def _call_user(self, name):
+    #: methods once-warned about (per process, mirroring the hosts'
+    #: log-once-per-name discipline)
+    _warned_methods: set = set()
+
+    def _ex_MethodCall(self, node):
+        """era new-GS1 GS2-style method calls (see ast.MethodCall). String
+        and list methods follow GS2's semantics; a mutating list method on a
+        VarRef base writes the list back to the flag store."""
+        args = [self.eval(a) for a in node.args]
+        name = node.name.lower()
+        is_ref = isinstance(node.base, ast.VarRef)
+        base = self.get_ref(node.base) if is_ref else self.eval(node.base)
+        if base is UNSET_VAL:
+            base = ""
+        if name == "tokenize":
+            s = to_str(base)
+            return s.split(to_str(args[0])) if args else s.split()
+        if name == "pos":
+            return float(to_str(base).find(to_str(args[0]))) if args else -1.0
+        if name == "starts":
+            return to_str(base).startswith(to_str(args[0])) if args else False
+        if name == "ends":
+            return to_str(base).endswith(to_str(args[0])) if args else False
+        if name == "upper":
+            return to_str(base).upper()
+        if name == "lower":
+            return to_str(base).lower()
+        if name == "trim":
+            return to_str(base).strip()
+        if name == "length":
+            return float(len(base) if isinstance(base, list)
+                         else len(to_str(base)))
+        if name == "charat":
+            s = to_str(base)
+            i = int(to_num(args[0])) if args else 0
+            return s[i] if 0 <= i < len(s) else ""
+        if name == "substring":
+            s = to_str(base)
+            start = int(to_num(args[0])) if args else 0
+            if start < 0:
+                start = 0
+            if len(args) >= 2 and to_num(args[1]) >= 0:
+                return s[start:start + int(to_num(args[1]))]
+            return s[start:]
+        if name in ("add", "delete", "clear", "size", "index"):
+            lst = base if isinstance(base, list) else []
+            if name == "size":
+                return float(len(lst))
+            if name == "index":
+                try:
+                    return float(lst.index(args[0])) if args else -1.0
+                except ValueError:
+                    return -1.0
+            if name == "add" and args:
+                lst = list(lst) + [args[0]]
+            elif name == "delete" and args:
+                i = int(to_num(args[0]))
+                lst = [v for j, v in enumerate(lst) if j != i]
+            elif name == "clear":
+                lst = []
+            if is_ref:
+                self.set_ref(node.base, lst)
+            return 0.0
+        if name not in Interpreter._warned_methods:
+            Interpreter._warned_methods.add(name)
+            logger.warning("GS1: unknown method %s()", node.name)
+        return 0.0
+
+    def _call_user(self, name, args=None):
         # Sync call (expression context, e.g. x = myfunc()): drain the generator
         # body. A sleep inside a function called from an expression can't suspend
         # (no scheduler in expression eval), so it falls back to the sync no-op.
-        for _ in self._gcall_user(name):
+        for _ in self._gcall_user(name, args):
             pass
         return 0.0
 

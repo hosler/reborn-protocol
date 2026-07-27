@@ -255,8 +255,17 @@ class Parser:
         self.eat("KW_FUNCTION")
         name = self._read_identifier_name()
         self.eat("TOKEN_PAREN_LEFT")
+        # Era-2006 new-GS1 parameter list: `function onActionBoomerang(dmg,
+        # attackacct, attackguild)` (see ast.FuncDef.params). Rejecting it
+        # killed the WHOLE script — era's -System/-MoveSystem/-BulletSystem
+        # clientside were 100% dead ("expected ')'" at the first param).
+        params = []
+        if not self.at("TOKEN_PAREN_RIGHT"):
+            params.append(self._read_identifier_name())
+            while self.accept("TOKEN_COMMA"):
+                params.append(self._read_identifier_name())
         self.eat("TOKEN_PAREN_RIGHT")
-        return ast.FuncDef(name, self.parse_block())
+        return ast.FuncDef(name, self.parse_block(), params)
 
     # builtinCommandStatement: COMMAND (arg (',' arg)*)?
     def parse_command(self):
@@ -288,7 +297,22 @@ class Parser:
         target = self._try_identifier_access()
         if target is not None and self.peek().type in ASSIGN_OPS:
             op = self.next().text
+            # era new-GS1 chained assignment: `atm = grabdisabled = onphone
+            # = false;` (-System onCreated). Collect the intermediate
+            # targets; everything gets the right-most value.
+            extra_targets = []
+            while op == "=":
+                mark2 = self.i
+                t2 = self._try_identifier_access()
+                if t2 is not None and self.peek().type == "OP_ASSIGN":
+                    self.next()
+                    extra_targets.append(t2)
+                    continue
+                self.i = mark2
+                break
             value = self.parse_expression()
+            for t2 in reversed(extra_targets):
+                value = ast.Assign(t2, "=", value)
             node = ast.Assign(target, op, value)
             if not no_terminator:
                 # An array-literal assignment is self-terminating at its '}',
@@ -299,18 +323,34 @@ class Parser:
                     return node
                 self._end_statement()
             return node
-        # userFunctionStatement: name '(' ')'
+        # userFunctionStatement: name '(' arg-list? ')'
+        # (era new-GS1 passes arguments: `CustomScript(dmg, acct);` — the
+        # zero-arg-only form dropped every such statement, the
+        # "got TOKEN_PAREN_LEFT" parse-recovery signature on era's
+        # -ItemSystem/-DayNight/-HPControls.)
         self.i = mark
         if (self.at("IDENTIFIER") and self.peek().text
-                and self.peek(1).type == "TOKEN_PAREN_LEFT"
-                and self.peek(2).type == "TOKEN_PAREN_RIGHT"):
+                and self.peek(1).type == "TOKEN_PAREN_LEFT"):
             name = self.next().text
             self.next()
-            self.next()
-            node = ast.UserCall(name)
-            if not no_terminator:
-                self._end_statement()
-            return node
+            args = []
+            ok = True
+            try:
+                if not self.at("TOKEN_PAREN_RIGHT"):
+                    args.append(self._paren_arg_or_empty())
+                    while self.accept("TOKEN_COMMA"):
+                        args.append(self._paren_arg_or_empty())
+                self.eat("TOKEN_PAREN_RIGHT")
+            except ParseError:
+                ok = False
+            # Commit only when the call IS the whole statement; anything
+            # else (`foo(1)+2;`) falls back to the expression path below.
+            if ok and self.at("END", EOF, "TOKEN_BRACE_RIGHT"):
+                node = ast.UserCall(name, args)
+                if not no_terminator:
+                    self._end_statement()
+                return node
+            self.i = mark
         # otherwise: expression statement
         self.i = mark
         expr = self.parse_expression()
@@ -356,10 +396,19 @@ class Parser:
         return node
 
     def parse_relational(self):
-        node = self.parse_additive()
+        node = self.parse_concat()
         if self.peek().type in RELATIONAL_OPS:
             op = self.next().text
-            node = ast.BinOp(op, node, self.parse_additive())
+            node = ast.BinOp(op, node, self.parse_concat())
+        return node
+
+    def parse_concat(self):
+        # era new-GS1 borrows GS2's `@` string concat (`"$" @ player.rupees`,
+        # -System). Binds looser than arithmetic, tighter than comparison.
+        node = self.parse_additive()
+        while self.peek().type == "OP_CONCAT":
+            self.next()
+            node = ast.BinOp("@", node, self.parse_additive())
         return node
 
     def parse_additive(self):
@@ -482,14 +531,35 @@ class Parser:
             return ast.SpecialLit(tt, t.text)
         if tt == "IDENTIFIER":
             node = self.parse_identifier_access()
-            # user-function call value: name '(' ')'
-            if (isinstance(node, ast.VarRef) and len(node.parts) == 1
-                    and not node.parts[0].index
-                    and self.at("TOKEN_PAREN_LEFT")
-                    and self.peek(1).type == "TOKEN_PAREN_RIGHT"):
+            # user-function call value: name '(' arg-list? ')' (args are
+            # era new-GS1 — see parse_funcdef; backtracks on any failure so
+            # a bare `name` followed by parenthesized text stays a VarRef).
+            # A DOTTED ref followed by '(' is a METHOD call (era GS2-ism:
+            # clientr.jail.tokenize(), client.message.add(x)); the last path
+            # part is the method, the rest the base ref.
+            if (isinstance(node, ast.VarRef)
+                    and not node.parts[-1].index
+                    and node.parts[-1].name
+                    and self.at("TOKEN_PAREN_LEFT")):
+                save = self.i
                 self.next()
-                self.next()
-                return ast.Call(node.parts[0].name, [])
+                args = []
+                try:
+                    if not self.at("TOKEN_PAREN_RIGHT"):
+                        args.append(self._paren_arg_or_empty())
+                        while self.accept("TOKEN_COMMA"):
+                            args.append(self._paren_arg_or_empty())
+                    self.eat("TOKEN_PAREN_RIGHT")
+                    if len(node.parts) == 1:
+                        node = ast.Call(node.parts[0].name, args)
+                    else:
+                        node = ast.MethodCall(
+                            ast.VarRef(node.parts[:-1]),
+                            node.parts[-1].name, args)
+                    node = self._parse_method_chain(node)
+                    return node
+                except ParseError:
+                    self.i = save
             return node
         raise ParseError("expected expression", t)
 
@@ -505,6 +575,30 @@ class Parser:
             else:  # MESSAGECODE
                 parts.append(self.parse_messagecode())
         return ast.StrConcat(parts)
+
+    def _parse_method_chain(self, node):
+        """`.method(args)` chain on a call result (era GS2-ism:
+        findWeaponNPC("-System").showFloat("*Cured!")). Backtracks if the
+        dot isn't followed by a call."""
+        while (self.at("TOKEN_PERIOD")
+               and self.peek(1).type == "IDENTIFIER"
+               and self.peek(2).type == "TOKEN_PAREN_LEFT"):
+            save = self.i
+            self.next()
+            name = self.next().text
+            self.next()
+            args = []
+            try:
+                if not self.at("TOKEN_PAREN_RIGHT"):
+                    args.append(self._paren_arg_or_empty())
+                    while self.accept("TOKEN_COMMA"):
+                        args.append(self._paren_arg_or_empty())
+                self.eat("TOKEN_PAREN_RIGHT")
+            except ParseError:
+                self.i = save
+                break
+            node = ast.MethodCall(node, name, args)
+        return node
 
     def _paren_arg_or_empty(self):
         # An omitted arg (e.g. strequals(a,) or #e(0,x,,)) is an empty string,

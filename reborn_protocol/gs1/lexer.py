@@ -56,7 +56,7 @@ OPERATORS = [
     ("<>", "OP_NOTEQ"), ("<=", "OP_LESS_EQ"), ("=<", "OP_LESS_EQ"),
     (">=", "OP_GREAT_EQ"), ("=>", "OP_GREAT_EQ"), ("++", "OP_INC"),
     ("--", "OP_DEC"), ("&&", "OP_LOGICALAND"), ("||", "OP_LOGICALOR"),
-    ("=", "OP_ASSIGN"), ("+", "OP_ADD"), ("-", "OP_SUB"), ("*", "OP_MUL"),
+    ("=", "OP_ASSIGN"), ("@", "OP_CONCAT"), ("+", "OP_ADD"), ("-", "OP_SUB"), ("*", "OP_MUL"),
     ("/", "OP_DIV"), ("%", "OP_MOD"), ("^", "OP_POW"), ("<", "OP_LESS"),
     (">", "OP_GREAT"), ("!", "OP_LOGICALNOT"),
 ]
@@ -91,7 +91,7 @@ _MC = re.compile(r"#(?:C[0-9]|P[0-9]+|P(?=\()|[angcmWw1235678NDLFfpbESptKkGsvIei
 MODE_OF = {
     "V": "V", "E": "E", "P": "E", "S": "S", "R": "R", "L": "L", "M": "M",
     "B": "B", "I": "I", "C": "C", "G": "G", "U": "U", "D": "D", "X": "X",
-    "Z": "Z", "(": "P1", ")": "P2", "<": "P3",
+    "Z": "Z", "(": "P1", ")": "P2", "<": "P3", "F": "F",
 }
 DEFAULT = "DEFAULT"
 
@@ -481,6 +481,16 @@ class Lexer:
             if word in ("true", "false"):
                 return Token(LITERAL, word, start)
             return Token(IDENTIFIER, word, start)
+        # In expression position (right after '(' or an operator) a command
+        # word is a VARIABLE/flag read, not a statement: era -MoveSystem
+        # tests `if (replaceani) {`, and classifying it COMMAND both killed
+        # the statement and corrupted the mode stack. A statement can never
+        # begin there, so this cannot shadow a real command.
+        if self.out and (self.out[-1].type == "TOKEN_PAREN_LEFT"
+                         or self.out[-1].type.startswith("OP_")):
+            if word in COMMANDS and word not in FUNCTIONS and word not in KW:
+                self.pos += len(word)
+                return Token(IDENTIFIER, word, start)
         # command? (longest literal wins; needs_space commands require a space)
         cs = COMMANDS.get(word)
         if cs is not None:
@@ -496,6 +506,16 @@ class Lexer:
                 is_call = self.pos < self.n and self.text[self.pos] == "("
                 if is_call:
                     self.pos += 1
+                    # zero-arg call spelling `enableweapons();` (era
+                    # -System): eat the empty parens whole, else the
+                    # dangling ')' surfaces in DEFAULT mode and parser
+                    # recovery drops the statement.
+                    j = self.pos
+                    while j < self.n and self.text[j] in " \t":
+                        j += 1
+                    if j < self.n and self.text[j] == ")":
+                        self.pos = j + 1
+                        is_call = False
                 self.push_command(cs["args"], is_command_call=is_call)
                 return Token(COMMAND, word, start)
         if word in FUNCTIONS:
@@ -505,7 +525,11 @@ class Lexer:
         if word in KW:
             self.pos += len(word)
             if word == "function":
-                self.push_command("V()")
+                # V = declaration name, ( = open paren, F = era new-GS1
+                # parameter list (identifiers/commas; ')' pops) — era 2006
+                # clientside declares `function onActionX(a, b, c)`, which
+                # the old zero-arg "V()" signature LexError'd on.
+                self.push_command("V(F")
             return Token(KW[word], word, start)
         if word in ("true", "false"):
             self.pos += len(word)
@@ -749,6 +773,13 @@ class Lexer:
     def _string_mode(self, raw):
         if self.pos >= self.n:
             return Token(EOF, "", self.pos)
+        # Call-form args are expression-style: whitespace around them is
+        # separator, not string content (`triggeraction(0, 0, "serverside",
+        # ...)` must not yield ' serverside').  Plain command form keeps
+        # every space (classic `say2 hello world`).
+        if (self.states and self.states[-1].is_command_call
+                and self._skip_ws()):
+            return None
         c = self.text[self.pos]
         if (c == ")" and self._can_func_pop() and self.brace_count == 0
                 and self.states[-1].is_command_call):
@@ -829,6 +860,10 @@ class Lexer:
         # around them) and never pop on comma.
         if self.pos >= self.n:
             return Token(EOF, "", self.pos)
+        # call-form: whitespace is separator, not content (see _string_mode)
+        if (self.states and self.states[-1].is_command_call
+                and self._skip_ws()):
+            return None
         c = self.text[self.pos]
         if c == "}" and self._can_cmd_pop():
             self.emit_before(END)
@@ -836,8 +871,15 @@ class Lexer:
             self.pos += 1
             return Token("TOKEN_BRACE_RIGHT", "}", self.pos - 1)
         if c == ")" and self._can_func_pop():
+            # Call-form (`triggeraction(0,0,"serverside","-System","x");`,
+            # era -System): the closing ')' pairs with the command's own
+            # '(' — swallow it like _mode_S/_mode_E do, else it leaks to
+            # the parser and recovery drops the whole statement.
+            is_command_call = self.states and self.states[-1].is_command_call
             self.pop_next_mode(True)
             self.pos += 1
+            if is_command_call:
+                return None
             return Token("TOKEN_PAREN_RIGHT", ")", self.pos - 1)
         if c == ";" and self._can_cmd_pop():
             self.pop_next_mode(True)
@@ -847,6 +889,9 @@ class Lexer:
             self.emit_after(STRING)
             self.pos += 1
             return Token("TOKEN_COMMA", ",", self.pos - 1)
+        if c == '"' and self.states and self.states[-1].is_command_call:
+            # call-form string args are quoted; strip like _mode_S
+            return self._scan_quoted_string()
         if self.text.startswith("##", self.pos):
             return self._match_hash_escape(STRING)
         if c == "#":
@@ -857,12 +902,15 @@ class Lexer:
         t, n = self.text, self.n
         cmd_pop = self._can_cmd_pop()
         func_pop = self._can_func_pop()
+        is_call = bool(self.states and self.states[-1].is_command_call)
         while self.pos < n:
             ch = t[self.pos]
             if ch == "#":
                 break
             if ch == ",":
                 break
+            if ch == '"' and is_call:
+                break               # quoted call-form arg: handled above
             if ch == "}" and cmd_pop:
                 break
             if ch == ";" and cmd_pop:
@@ -997,6 +1045,28 @@ class Lexer:
             self.pos += 1
             return Token("TOKEN_PAREN_LEFT", "(", self.pos - 1)
         raise LexError("expected '(' after function", self.pos, self._line)
+
+    def _mode_F(self):
+        # Function-declaration parameter list (era new-GS1): bare identifiers
+        # separated by commas; ')' terminates the declaration state.
+        if self._skip_ws():
+            return None
+        if self.pos >= self.n:
+            return Token(EOF, "", self.pos)
+        ch = self.text[self.pos]
+        if ch == ")":
+            self.pop_next_mode(terminate_early=True)
+            self.pos += 1
+            return Token("TOKEN_PAREN_RIGHT", ")", self.pos - 1)
+        if ch == ",":
+            self.pos += 1
+            return Token("TOKEN_COMMA", ",", self.pos - 1)
+        m = _IDENT.match(self.text, self.pos)
+        if m:
+            start = self.pos
+            self.pos = m.end()
+            return Token(IDENTIFIER, m.group(0), start)
+        raise LexError("expected ')'", self.pos, self._line)
 
     def _mode_P2(self):
         if self._skip_ws():

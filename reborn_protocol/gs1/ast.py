@@ -52,6 +52,11 @@ class With:
 class FuncDef:
     name: str
     body: list
+    # Era-2006 "new GS1" allows GS2-style parameter lists on function
+    # declarations (era's -System/-MoveSystem/-BulletSystem clientside all
+    # declare `function onActionX(a, b, c)` in otherwise-classic GS1 —
+    # shipped content is the oracle; GServer-v2's grammar predates it).
+    params: list = field(default_factory=list)
 
 
 @dataclass
@@ -68,6 +73,17 @@ class Command:
 @dataclass
 class UserCall:
     name: str
+    args: list = field(default_factory=list)
+
+
+@dataclass
+class MethodCall:
+    # era new-GS1 GS2-ism: `clientr.jail.tokenize()`, `client.message.add(x)`,
+    # `player.level.name.pos("gym")`, and `<call>.method(...)` chains.
+    # base is a VarRef (flag/prop path) or another expression node.
+    base: Any
+    name: str
+    args: list = field(default_factory=list)
 
 
 @dataclass
