@@ -910,6 +910,19 @@ class GS2VM:
             # nodes under exactly this shape), while a plain READ stays None
             # and creates nothing -- see _NameVivifyRef.
             frame.stack.append(_NameVivifyRef(self, frame, base_entry.name, name))
+        elif isinstance(base_entry, str):
+            # A string LITERAL that survived OP_CONV_TO_OBJECT unresolved
+            # rides along as the base, so OP_CALL can hand it to the host --
+            # `"-Serverlist_Options".showOptions()` is a universe-name
+            # method call whose object may need installing first (the host's
+            # weapon-fetch stand-in). Reads/writes on it stay dead
+            # (LValue.get/set gate on GS2Object). A string held in a
+            # PROPERTY stays a dead reference: the official conversion only
+            # name-resolves literals -- the property case reads the slot's
+            # object and falls back to CSV-tokens-or-null
+            # (TScriptStackEntry::switchTypeObject/makeProperty,
+            # TScriptStackEntry.cpp:299-353).
+            frame.stack.append(LValue(base_entry, name))
         else:
             frame.stack.append(LValue(None, name))
 
