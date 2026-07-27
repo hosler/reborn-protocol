@@ -124,6 +124,9 @@ class _State:
     # `#E(base64encode(#s(...)))` corpus case keeps a literal ')' in the
     # result), while function args balance plain parens.
     is_messagecode: bool = False
+    # A no-space command may also use function-call spelling (`cmd(a,b)`).
+    # The wrapper parens are syntax, not argument text/tokens.
+    is_command_call: bool = False
 
 
 class LexError(Exception):
@@ -190,9 +193,11 @@ class Lexer:
         st = self.states[-1] if self.states else None
         return bool(st and st.arguments and st.arguments[0] == "(")
 
-    def push_command(self, arguments: str, is_messagecode: bool = False):
-        self.states.append(_State(arguments, POP_COMMAND, True,
-                                  is_messagecode))
+    def push_command(self, arguments: str, is_messagecode: bool = False,
+                     is_command_call: bool = False):
+        pop_mode = POP_FUNCTION if is_command_call else POP_COMMAND
+        self.states.append(_State(arguments, pop_mode, True,
+                                  is_messagecode, is_command_call))
         self.mode_stack.append(self.mode)  # pushMode(dummy) saves current mode
         # brace_count counts *plain* grouping parens still open in the
         # current command/function/messagecode's own argument expression, so
@@ -488,7 +493,10 @@ class Lexer:
                 # no space -> not this command, fall through
             else:
                 self.pos += len(word)
-                self.push_command(cs["args"])
+                is_call = self.pos < self.n and self.text[self.pos] == "("
+                if is_call:
+                    self.pos += 1
+                self.push_command(cs["args"], is_command_call=is_call)
                 return Token(COMMAND, word, start)
         if word in FUNCTIONS:
             self.pos += len(word)
@@ -594,8 +602,11 @@ class Lexer:
             return Token(END, ";", self.pos - 1)
         if c == ")":
             if not plain_parens and self.array_lit_depth == 0 and self._can_func_pop() and self.brace_count == 0:
+                is_command_call = self.states[-1].is_command_call
                 self.pop_next_mode(True)
                 self.pos += 1
+                if is_command_call:
+                    return None
                 return Token("TOKEN_PAREN_RIGHT", ")", self.pos - 1)
             self.pos += 1
             if track_braces:
@@ -669,8 +680,11 @@ class Lexer:
             self.pos += 1
             return Token("TOKEN_PAREN_LEFT", "(", self.pos - 1)
         if c == ")" and self._can_func_pop():
+            is_command_call = self.states[-1].is_command_call
             self.pop_next_mode(True)
             self.pos += 1
+            if is_command_call:
+                return None
             return Token("TOKEN_PAREN_RIGHT", ")", self.pos - 1)
         if c == ";" and self._can_cmd_pop():
             self.pop_next_mode(True)
@@ -736,6 +750,11 @@ class Lexer:
         if self.pos >= self.n:
             return Token(EOF, "", self.pos)
         c = self.text[self.pos]
+        if (c == ")" and self._can_func_pop() and self.brace_count == 0
+                and self.states[-1].is_command_call):
+            self.pop_next_mode(True)
+            self.pos += 1
+            return None
         if c == "}" and self._can_cmd_pop():
             self.emit_before(END)
             self.pop_next_mode(True)
@@ -754,6 +773,8 @@ class Lexer:
             self.pop_next_mode()
             self.pos += 1
             return Token("TOKEN_COMMA", ",", self.pos - 1)
+        if c == '"' and self.states and self.states[-1].is_command_call:
+            return self._scan_quoted_string()
         if self.text.startswith("##", self.pos):
             return self._match_hash_escape(STRING)
         if not raw:
@@ -780,6 +801,9 @@ class Lexer:
                    and not self.states[-1].is_messagecode)
         while self.pos < n:
             ch = t[self.pos]
+            if (ch == '"' and self.states
+                    and self.states[-1].is_command_call):
+                break
             if (not raw and ch == "#") or (raw and t.startswith("##", self.pos)):
                 break
             if ch == "}" and cmd_pop:
