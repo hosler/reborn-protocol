@@ -49,6 +49,13 @@ class With:
 
 
 @dataclass
+class Switch:
+    value: Any
+    cases: list
+    default: Optional[list] = None
+
+
+@dataclass
 class FuncDef:
     name: str
     body: list

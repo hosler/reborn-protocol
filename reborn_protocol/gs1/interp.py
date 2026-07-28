@@ -15,6 +15,7 @@ import hashlib
 import logging
 import math
 import random as _random
+import re
 
 from . import ast
 from .parser import parse
@@ -200,6 +201,24 @@ class Interpreter:
                 yield from self._gblock(node.els)
         elif t == "Block":
             yield from self._gblock(node.body)
+        elif t == "Switch":
+            value = self.eval(node.value)
+            body = node.default
+            for i, (match, _candidate) in enumerate(node.cases):
+                if self._switch_equal(value, self.eval(match)):
+                    body = [
+                        stmt
+                        for _match, candidate in node.cases[i:]
+                        for stmt in candidate
+                    ]
+                    if node.default is not None:
+                        body.extend(node.default)
+                    break
+            if body is not None:
+                try:
+                    yield from self._gblock(body)
+                except BreakSignal:
+                    pass
         elif t == "While":
             self._loop_depth += 1
             iterations = 0
@@ -238,6 +257,23 @@ class Interpreter:
         elif t == "With":
             obj = self.eval(node.obj)
             prev = self.ctx.this_obj
+            explicit_this = (
+                isinstance(node.obj, ast.VarRef)
+                and len(node.obj.parts) == 1
+                and node.obj.parts[0].name == "this")
+            if explicit_this:
+                obj = self.ctx.vars.scopes.get("this", obj)
+            is_object = (
+                explicit_this
+                or getattr(obj, "gs1_with_members", False)
+                or isinstance(obj, dict)
+                or (obj is not None
+                    and not isinstance(obj, (str, bytes, int, float,
+                                            bool, list, tuple))))
+            # GServer-v2 GS1Visitor.cpp:973-981: "No object? Don't execute
+            # the block." Invalid targets must not fall back to the caller.
+            if not is_object:
+                return
             self.ctx.this_obj = obj
             try:
                 yield from self._gblock(node.body)
@@ -283,19 +319,27 @@ class Interpreter:
             args = args or []
             store = self.ctx.vars
             for i, p in enumerate(params):
-                saved.append((p, store.get(None, p)))
-                store.set(None, p, args[i] if i < len(args) else 0.0)
+                scope, key = self._parameter_ref(p)
+                saved.append((scope, key, store.get(scope, key)))
+                store.set(scope, key, args[i] if i < len(args) else 0.0)
         try:
             yield from self._gblock(fn.body)
         except ReturnSignal:
             pass
         finally:
-            for p, old in saved:
+            for scope, key, old in saved:
                 if old is UNSET:
-                    self.ctx.vars.unset(None, p)
+                    self.ctx.vars.unset(scope, key)
                 else:
-                    self.ctx.vars.set(None, p, old)
+                    self.ctx.vars.set(scope, key, old)
             self._depth -= 1
+
+    @staticmethod
+    def _parameter_ref(name):
+        namespace, dot, key = name.partition(".")
+        if dot and namespace in NAMESPACES:
+            return NAMESPACES[namespace], key
+        return None, name
 
     def _fire_event_function(self, event):
         """GS2-convention event FUNCTIONS in era new-GS1: `function
@@ -371,12 +415,30 @@ class Interpreter:
             # resumable sleep pending on this ctx. See Context.sleep_cancelled.
             self.ctx.sleep_cancelled = True
         if node.op == "=" and not isinstance(value, (list, bool)):
-            # Plain assignment is numeric; text requires setstring. Exception:
-            # an explicit `@` concat is era new-GS1 and its result is TEXT
-            # (`client.rupees = "$" @ player.rupees;` must not become 0).
-            if not (isinstance(node.value, ast.BinOp) and node.value.op == "@"):
+            # Plain assignment is numeric; text requires setstring. Two
+            # exceptions: an explicit `@` concat is era new-GS1 and its
+            # result is TEXT (`client.rupees = "$" @ player.rupees;` must
+            # not become 0), and inside a with-block whose target is a HOST
+            # OBJECT (gs1_with_members -- findimg layers / particle
+            # emitters) writes keep their value: era's particle scripts do
+            # `image = "smoke3.png";` in that scope and 0.0 there would
+            # corrupt the member.
+            if not self._assigns_string(node.value) \
+                    and not getattr(self.ctx.this_obj, "gs1_with_members",
+                                    False):
                 value = to_num(value)
         self.set_ref(node.target, value)
+
+    @staticmethod
+    def _assigns_string(node):
+        if isinstance(node, ast.BinOp) and node.op == "@":
+            return True
+        if isinstance(node, ast.Call) and node.name in ("_", "format"):
+            return True
+        if isinstance(node, ast.Ternary):
+            return (Interpreter._assigns_string(node.a)
+                    or Interpreter._assigns_string(node.b))
+        return False
 
     def _is_bare_timeout(self, ref):
         """True if `ref` is the unscoped, unindexed identifier `timeout`
@@ -604,7 +666,11 @@ class Interpreter:
                 return "" if v is UNSET_VAL else to_str(v)
             return to_str(self.eval(a[0]))
         if code == "#v":
-            return to_str(to_num(self.eval(a[0]))) if a else "0"
+            if not a:
+                return "0"
+            value = self.eval(a[0])
+            return (to_str(value) if self._assigns_string(a[0])
+                    else to_str(to_num(value)))
         if code == "#U":
             return to_str(self.eval(a[0])) if a else ""
         if code == "#T":  # trim
@@ -785,6 +851,14 @@ class Interpreter:
             return list(a) == list(b)
         return doubles_are_same(gs1_num(a), gs1_num(b))
 
+    @staticmethod
+    def _switch_equal(a, b):
+        if isinstance(a, str) and isinstance(b, str):
+            return a.lower() == b.lower()
+        if isinstance(a, str) or isinstance(b, str):
+            return doubles_are_same(to_num(a), to_num(b))
+        return Interpreter._eq(a, b)
+
     def _compound(self, op, cur, value):
         base = op[0]
         if base == "+":
@@ -839,6 +913,20 @@ class Interpreter:
         base = self.get_ref(node.base) if is_ref else self.eval(node.base)
         if base is UNSET_VAL:
             base = ""
+        # host objects (particle emitters/modifiers, ...) answer their own
+        # method surface: `emitter.addlocalmodifier(...)` in era's new-GS1
+        # dialect. NotImplemented = not one of the object's methods.
+        hook = getattr(base, "gs1_method", None)
+        if hook is not None:
+            result = hook(name, args)
+            if result is not NotImplemented:
+                return result
+        # New-GS1 class joins are commonly spelled `this.join("class")`;
+        # route that method form through the same host command as classic
+        # `join class`.
+        if name == "join":
+            self.ctx.host.call_command("join", args, self.ctx)
+            return 0.0
         if name == "tokenize":
             s = to_str(base)
             return s.split(to_str(args[0])) if args else s.split()
@@ -911,7 +999,9 @@ class Interpreter:
         if part.name or not part.atoms:
             return part.name
         return "".join(
-            p.value if isinstance(p, ast.Str) else self._eval_messagecode(p)
+            p.value if isinstance(p, ast.Str)
+            else self._eval_messagecode(p) if isinstance(p, ast.MessageCode)
+            else to_str(self.eval(p))
             for p in part.atoms)
 
     def _resolve(self, ref):
@@ -1326,6 +1416,40 @@ def _getflagkeys(interp, a):
     return result
 
 
+_FORMAT_SPEC = re.compile(r"%([-+0 #]*)(\d+)?(?:\.(\d+))?([sdif])")
+
+
+def _format(args):
+    if not args:
+        return ""
+    values = iter(args[1:])
+
+    def replace(match):
+        try:
+            value = next(values)
+        except StopIteration:
+            return match.group(0)
+        flags, width, precision, kind = match.groups()
+        spec = "%" + flags + (width or "")
+        if precision is not None:
+            spec += "." + precision
+        spec += kind
+        if kind == "s":
+            value = to_str(value)
+        elif kind in ("d", "i"):
+            value = gs1_int(value)
+        else:
+            value = to_num(value)
+        try:
+            return spec % value
+        except (TypeError, ValueError):
+            return to_str(value)
+
+    marker = "\0"
+    template = to_str(args[0]).replace("%%", marker)
+    return _FORMAT_SPEC.sub(replace, template).replace(marker, "%")
+
+
 _PURE = {
     # math
     "random": _f_random,
@@ -1349,6 +1473,8 @@ _PURE = {
     "keycode": lambda self, a: _keycode(a),
     "strlen": lambda self, a: float(len(to_str(a[0]))) if a else 0.0,
     "strtofloat": lambda self, a: to_num(a[0]) if a else 0.0,
+    "_": lambda self, a: a[0] if a else "",
+    "format": lambda self, a: _format(a),
     # GS1 string matching is CASE-INSENSITIVE (GServer-v2 uses equalsi/findi),
     # which the Bomber room states rely on ("Open"/"Join"/"Host" vs open/join).
     "strequals": lambda self, a: len(a) > 1 and to_str(a[0]).lower() == to_str(a[1]).lower(),

@@ -46,6 +46,7 @@ class Parser:
         self.i = 0
         self.recover = recover
         self.errors: list[ParseError] = []
+        self._parsing_case_label = False
 
     def _synchronize(self):
         """Panic-mode recovery: skip to the next ';' (consumed) or '}'/EOF.
@@ -166,6 +167,8 @@ class Parser:
             return self.parse_while()
         if t == "KW_WITH":
             return self.parse_with()
+        if t == "KW_SWITCH":
+            return self.parse_switch()
         if t == "KW_FUNCTION":
             return self.parse_funcdef()
         if t in ("KW_RETURN", "KW_BREAK", "KW_CONTINUE"):
@@ -251,6 +254,78 @@ class Parser:
         self.eat("TOKEN_PAREN_RIGHT")
         return ast.With(obj, self.parse_block())
 
+    def parse_switch(self):
+        self.eat("KW_SWITCH")
+        self.eat("TOKEN_PAREN_LEFT")
+        value = self.parse_expression()
+        self.eat("TOKEN_PAREN_RIGHT")
+        self.eat("TOKEN_BRACE_LEFT")
+        cases = []
+        default = None
+        try:
+            while not self.at("TOKEN_BRACE_RIGHT", EOF):
+                if self.accept("END"):
+                    continue
+                if self._accept_word("case"):
+                    self._parsing_case_label = True
+                    try:
+                        match = self.parse_expression()
+                    finally:
+                        self._parsing_case_label = False
+                    self._case_colon()
+                    body = self._parse_case_body()
+                    cases.append((match, body))
+                    continue
+                if self._accept_word("default"):
+                    self._case_colon()
+                    default = self._parse_case_body()
+                    continue
+                raise ParseError("expected case or default", self.peek())
+        except ParseError as error:
+            if not self.recover:
+                raise
+            self.errors.append(error)
+            self._discard_switch_body()
+            return ast.Switch(value, [], None)
+        self.eat("TOKEN_BRACE_RIGHT")
+        return ast.Switch(value, cases, default)
+
+    def _discard_switch_body(self):
+        """Consume the rest of a malformed switch so its body cannot escape."""
+        depth = 1
+        while depth and not self.at(EOF):
+            token = self.next()
+            if token.type == "TOKEN_BRACE_LEFT":
+                depth += 1
+            elif token.type == "TOKEN_BRACE_RIGHT":
+                depth -= 1
+
+    def _case_colon(self):
+        if self.at("TOKEN_COLON"):
+            self.next()
+            return
+        if self.at("IDENTIFIER") and self.peek().text == ":":
+            self.next()
+            return
+        raise ParseError("expected ':'", self.peek())
+
+    def _parse_case_body(self):
+        body = []
+        while (not self.at("TOKEN_BRACE_RIGHT", EOF)
+               and not self._at_word("case", "default")):
+            if self.accept("END"):
+                continue
+            body.append(self.parse_statement())
+        return body
+
+    def _at_word(self, *words):
+        return self.at("IDENTIFIER") and self.peek().text in words
+
+    def _accept_word(self, word):
+        if self._at_word(word):
+            return self.next()
+        return None
+
     def parse_funcdef(self):
         self.eat("KW_FUNCTION")
         name = self._read_identifier_name()
@@ -261,11 +336,17 @@ class Parser:
         # clientside were 100% dead ("expected ')'" at the first param).
         params = []
         if not self.at("TOKEN_PAREN_RIGHT"):
-            params.append(self._read_identifier_name())
+            params.append(self._read_parameter_name())
             while self.accept("TOKEN_COMMA"):
-                params.append(self._read_identifier_name())
+                params.append(self._read_parameter_name())
         self.eat("TOKEN_PAREN_RIGHT")
         return ast.FuncDef(name, self.parse_block(), params)
+
+    def _read_parameter_name(self):
+        ref = self.parse_identifier_access()
+        if any(part.index or not part.name for part in ref.parts):
+            raise ParseError("expected parameter name", self.peek())
+        return ".".join(part.name for part in ref.parts)
 
     # builtinCommandStatement: COMMAND (arg (',' arg)*)?
     def parse_command(self):
@@ -649,7 +730,18 @@ class Parser:
         parts = [self._read_path_part()]
         while self.at("TOKEN_PERIOD"):
             self.next()
-            parts.append(self._read_path_part())
+            if self.accept("TOKEN_PAREN_LEFT"):
+                expr = self.parse_expression()
+                self.eat("TOKEN_PAREN_RIGHT")
+                part = ast.PathPart("", [], [expr])
+                if self.accept("TOKEN_BRACKET_LEFT"):
+                    part.index.append(self.parse_expression())
+                    if self.accept("TOKEN_COMMA"):
+                        part.index.append(self.parse_expression())
+                    self.eat("TOKEN_BRACKET_RIGHT")
+                parts.append(part)
+            else:
+                parts.append(self._read_path_part())
         return ast.VarRef(parts)
 
     def _try_identifier_access(self):
@@ -669,6 +761,8 @@ class Parser:
         while True:
             t = self.peek()
             if t.type == "IDENTIFIER":
+                if self._parsing_case_label and t.text == ":":
+                    break
                 self.next()
                 if t.text:
                     atoms.append(ast.Str(t.text))

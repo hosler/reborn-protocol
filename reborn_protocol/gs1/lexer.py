@@ -44,7 +44,7 @@ EOF = "EOF"
 KW = {
     "with": "KW_WITH", "function": "KW_FUNCTION", "if": "KW_IF",
     "else": "KW_ELSE", "elseif": "KW_ELSEIF", "for": "KW_FOR",
-    "while": "KW_WHILE",
+    "while": "KW_WHILE", "switch": "KW_SWITCH",
     "return": "KW_RETURN", "break": "KW_BREAK", "continue": "KW_CONTINUE",
 }
 
@@ -349,6 +349,11 @@ class Lexer:
         m = _IDENT.match(self.text, self.pos)
         return m.group(0) if m else None
 
+    def _next_nonspace(self, pos):
+        while pos < self.n and self.text[pos] in " \t\r\n":
+            pos += 1
+        return self.text[pos] if pos < self.n else ""
+
     def _try_real(self):
         m = _REAL.match(self.text, self.pos)
         if not m:
@@ -518,11 +523,15 @@ class Lexer:
                         is_call = False
                 self.push_command(cs["args"], is_command_call=is_call)
                 return Token(COMMAND, word, start)
-        if word in FUNCTIONS:
+        if word in FUNCTIONS and self._next_nonspace(start + len(word)) == "(":
             self.pos += len(word)
             self.push_command(FUNCTIONS[word])
             return Token(FUNCTION, word, start)
         if word in KW:
+            if (word == "switch"
+                    and self._next_nonspace(start + len(word)) != "("):
+                self.pos += len(word)
+                return Token(IDENTIFIER, word, start)
             self.pos += len(word)
             if word == "function":
                 # V = declaration name, ( = open paren, F = era new-GS1
@@ -564,7 +573,7 @@ class Lexer:
             if word in ("true", "false"):
                 return Token(LITERAL, word, start)
             return Token(IDENTIFIER, word, start)
-        if word in FUNCTIONS:
+        if word in FUNCTIONS and self._next_nonspace(start + len(word)) == "(":
             self.pos += len(word)
             self.push_command(FUNCTIONS[word])
             return Token(FUNCTION, word, start)
@@ -736,7 +745,7 @@ class Lexer:
             # part of the identifier, not multiplication (that's expr mode).
             self.pos += 1
             return Token(IDENTIFIER, "*", self.pos - 1)
-        if c in "!:":
+        if c in "!:-":
             # Classic flag names are strings rather than language identifiers.
             # In a V argument (`set`/`unset` and other flag-target commands),
             # punctuation is part of the compound flag name; adjacent #x(...)
@@ -781,6 +790,17 @@ class Lexer:
                 and self._skip_ws()):
             return None
         c = self.text[self.pos]
+        if (not raw and self.states and self.states[-1].is_command_call
+                and (c.isalpha() or c == "_")):
+            word = self._scan_word()
+            if (word in FUNCTIONS
+                    and self._next_nonspace(self.pos + len(word)) == "("):
+                if self.after and self.after[-1].type == STRING:
+                    self.after.pop()
+                elif (self.out and self.out[-1].type == STRING
+                      and self.out[-1].text == ""):
+                    self.out.pop()
+                return self._expr_word()
         if (c == ")" and self._can_func_pop() and self.brace_count == 0
                 and self.states[-1].is_command_call):
             self.pop_next_mode(True)
@@ -865,6 +885,17 @@ class Lexer:
                 and self._skip_ws()):
             return None
         c = self.text[self.pos]
+        if (self.states and self.states[-1].is_command_call
+                and (c.isalpha() or c == "_")):
+            word = self._scan_word()
+            if (word in FUNCTIONS
+                    and self._next_nonspace(self.pos + len(word)) == "("):
+                if self.after and self.after[-1].type == STRING:
+                    self.after.pop()
+                elif (self.out and self.out[-1].type == STRING
+                      and self.out[-1].text == ""):
+                    self.out.pop()
+                return self._expr_word()
         if c == "}" and self._can_cmd_pop():
             self.emit_before(END)
             self.pop_next_mode(True)
@@ -1061,6 +1092,9 @@ class Lexer:
         if ch == ",":
             self.pos += 1
             return Token("TOKEN_COMMA", ",", self.pos - 1)
+        if ch == ".":
+            self.pos += 1
+            return Token("TOKEN_PERIOD", ".", self.pos - 1)
         m = _IDENT.match(self.text, self.pos)
         if m:
             start = self.pos
