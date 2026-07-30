@@ -14,12 +14,14 @@ from ._tables import COMMANDS, FUNCTIONS, MESSAGECODES
 from .lexer import tokenize, Token, LexError
 from .parser import parse, Parser, ParseError
 from .runtime import Context, Host, MemoryHost, VarStore
-from .interp import Interpreter, ResumableExecution, run, run_event, run_event_resumable
+from .interp import (Interpreter, PREEMPTED, ResumableExecution, run, run_event,
+                     run_event_resumable)
 
 __all__ = [
     "COMMANDS", "FUNCTIONS", "MESSAGECODES",
     "tokenize", "Token", "LexError",
     "parse", "Parser", "ParseError",
     "Context", "Host", "MemoryHost", "VarStore",
-    "Interpreter", "ResumableExecution", "run", "run_event", "run_event_resumable",
+    "Interpreter", "PREEMPTED", "ResumableExecution",
+    "run", "run_event", "run_event_resumable",
 ]

@@ -29,6 +29,12 @@ from .values import (to_num, to_str, fmt_num,
 
 logger = logging.getLogger(__name__)
 
+# Sleep suspension yields a numeric delay.  Cooperative schedulers need a
+# value outside that domain: an opaque object also makes an older scheduler's
+# float(delay) fail loudly instead of accidentally treating preemption as a
+# zero-second sleep and changing when the continuation runs.
+PREEMPTED = object()
+
 # commands the interpreter handles itself (manipulate the var store)
 _VAR_COMMANDS = {
     "set", "unset", "setstring", "setarray",
@@ -108,6 +114,13 @@ class Interpreter:
         # the pygserver and expression-call paths) are UNCHANGED by that
         # addition -- they never set this, so they keep today's behavior.
         self._coro = resumable
+        # Opt-in statement budget for one coroutine slice.  Zero preserves the
+        # historical generator exactly: sleep remains its only possible yield.
+        # The guard is structurally tied to _coro, so run_event and every other
+        # synchronous caller can never observe PREEMPTED even if a host sets a
+        # budget on an Interpreter that it later drives synchronously.
+        self.statement_budget = 0
+        self._iterating_event = False
 
     # -- entry -------------------------------------------------------------
     def run(self, program: ast.Program):
@@ -168,8 +181,16 @@ class Interpreter:
     # -- statements --------------------------------------------------------
     def _step(self):
         self.ctx.steps += 1
+        if (self._coro and self._iterating_event and self.statement_budget
+                and self.ctx.steps > self.statement_budget):
+            # The statement that found the boundary has not executed yet.
+            # Reset here, then _gx counts it as the first statement only after
+            # the scheduler resumes, so no statement moves or replays.
+            self.ctx.steps = 0
+            return True
         if self.ctx.steps > self.ctx.max_steps:
             raise RuntimeError("GS1 step budget exceeded (possible infinite loop)")
+        return False
 
     # -- synchronous drains (pygserver / tests / non-suspending contexts) ---
     # In coro mode these still run to completion immediately; only the scheduler
@@ -192,7 +213,9 @@ class Interpreter:
         """Execute one statement as a generator. Yields sleep-seconds when the
         script suspends (coro mode); control-flow recurses via `yield from`.
         Leaf statements run synchronously via their `_st_*` handlers."""
-        self._step()
+        if self._step():
+            yield PREEMPTED
+            self.ctx.steps = 1
         t = type(node).__name__
         if t == "If":
             if gs1_truthy(self.eval(node.cond)):
@@ -372,23 +395,27 @@ class Interpreter:
     def iter_event(self, program: ast.Program, event: str):
         """Coroutine entry: run an event as a generator that yields sleep-seconds
         (coro mode). The scheduler drives this; sync callers use run_event."""
-        self.ctx.active_event = event
-        self.ctx.tokens_count = 0
-        self.ctx.vars.unset(None, "tokenscount")
-        for stmt in program.body:
-            if isinstance(stmt, ast.FuncDef):
-                self.ctx.functions[stmt.name] = stmt
-        for stmt in program.body:
-            if isinstance(stmt, ast.FuncDef):
-                continue
-            try:
-                yield from self._gx(stmt)
-            except (BreakSignal, ContinueSignal, ReturnSignal):
-                pass  # stray control-flow outside a loop is a no-op
         try:
-            yield from self._fire_event_function(event)
-        except (BreakSignal, ContinueSignal, ReturnSignal):
-            pass
+            self._iterating_event = True
+            self.ctx.active_event = event
+            self.ctx.tokens_count = 0
+            self.ctx.vars.unset(None, "tokenscount")
+            for stmt in program.body:
+                if isinstance(stmt, ast.FuncDef):
+                    self.ctx.functions[stmt.name] = stmt
+            for stmt in program.body:
+                if isinstance(stmt, ast.FuncDef):
+                    continue
+                try:
+                    yield from self._gx(stmt)
+                except (BreakSignal, ContinueSignal, ReturnSignal):
+                    pass  # stray control-flow outside a loop is a no-op
+            try:
+                yield from self._fire_event_function(event)
+            except (BreakSignal, ContinueSignal, ReturnSignal):
+                pass
+        finally:
+            self._iterating_event = False
 
     def _st_ExprStmt(self, node):
         if node.expr is not None:
