@@ -1,8 +1,8 @@
 """
 reborn_protocol - Shared protocol library for Reborn Online
 
-This library provides common protocol components used by both
-pygserver (server) and pyReborn (client) implementations.
+The pygserver server and the pyReborn client use these common protocol
+components.
 
 Components:
 - Encryption: ENCRYPT_GEN_5 XOR cipher

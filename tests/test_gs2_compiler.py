@@ -71,7 +71,9 @@ def test_gs2_source_recompiles_to_baseline(src, expected, tmp_path):
 
 def test_at_least_one_pair_when_compiler_present():
     """Guard: if the compiler is available we must actually have vectors to run,
-    so a fixture-path regression can't silently reduce this to zero tests."""
+    This guard prevents a fixture-path regression from reducing the count to
+    zero tests without notice.
+    """
     if GS2TEST is None:
         pytest.skip("compiler not built")
     assert PAIRS, "gs2test is present but no .gs2/.bytecode fixture pairs found"

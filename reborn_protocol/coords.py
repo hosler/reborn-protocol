@@ -15,7 +15,7 @@ CLAUDE.md:252-255) is that the world->segment step uses ``math.floor()``, not
 ``int()``: for a negative world coordinate ``int()`` truncates toward zero and
 lands one segment too far right/down. ``x // 64`` — the other spelling found in
 the tree — agrees with ``floor(x / 64)`` over every coordinate the wire can
-carry (positions are multiples of 1/16 tile), so both were correct;
+carry (positions are multiples of 1/16 tile), so both forms were correct.
 ``int(x / 64)`` is the one that is not.
 
 Because LEVEL_SIZE is a power of two, ``%`` and ``*`` are exact on floats, so

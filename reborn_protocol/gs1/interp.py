@@ -140,7 +140,7 @@ class Interpreter:
 
         In GS1 an event name (created, playerenters, playerchats, ...) is a flag
         that reads true only during that event, so `if (playerchats && ...)` and
-        `if (created)` gate behaviour. We run every top-level statement; blocks
+`if (created)` gate behaviour. We run every top-level statement. Blocks
         for other events see their flag as false and skip themselves.
         """
         self.ctx.active_event = event
@@ -166,8 +166,8 @@ class Interpreter:
         """Opt-in entry point for hosts that want real suspend/resume `sleep`
         semantics instead of the sync break-the-loop fallback (see the _coro
         comment on __init__). Forces coro mode on THIS Interpreter -- create
-        a fresh Interpreter per resumable run (don't share one across
-        concurrent runs; _depth/_loop_depth and ctx.this_obj/charprop_source
+a fresh Interpreter per resumable run (do not share one across
+concurrent runs. _depth/_loop_depth and ctx.this_obj/charprop_source
         are live interpreter/ctx state for the duration a run is suspended).
 
         Returns a ResumableExecution already advanced to its first sleep (or
@@ -211,7 +211,7 @@ class Interpreter:
 
     def _gx(self, node):
         """Execute one statement as a generator. Yields sleep-seconds when the
-        script suspends (coro mode); control-flow recurses via `yield from`.
+script suspends (coro mode). Control flow recurses through `yield from`.
         Leaf statements run synchronously via their `_st_*` handlers."""
         if self._step():
             yield PREEMPTED
@@ -370,7 +370,7 @@ class Interpreter:
         event — era 2006's -System/-BulletSystem clientside is written
         entirely this way (the classic flag-block form has no function
         names, so this cannot double-fire it). Name match is
-        case-insensitive like every GS1 name; parameters bind from #p(n)
+case-insensitive like every GS1 name. Parameters bind from #p(n)
         (the keypressed/actionprojectile argument channel)."""
         if not event:
             return
@@ -394,7 +394,7 @@ class Interpreter:
 
     def iter_event(self, program: ast.Program, event: str):
         """Coroutine entry: run an event as a generator that yields sleep-seconds
-        (coro mode). The scheduler drives this; sync callers use run_event."""
+(coro mode). The scheduler drives this. Synchronous callers use run_event."""
         try:
             self._iterating_event = True
             self.ctx.active_event = event
@@ -653,7 +653,7 @@ class Interpreter:
         variable's VALUE, not the literal text (e.g. strlen(server.room1=) is the
         length of room1's value). Restricted to NAMESPACED refs that EXIST, so
         ordinary string literals ending in '=' (e.g. "Score=") are left alone.
-        Returns the value string, or None if `s` isn't this idiom."""
+    Return the value string. If `s` does not use this idiom, return None."""
         if len(s) < 3 or s[-1] != "=" or s[-2] == "=":
             return None
         name = s[:-1]
@@ -932,7 +932,7 @@ class Interpreter:
 
     def _ex_MethodCall(self, node):
         """era new-GS1 GS2-style method calls (see ast.MethodCall). String
-        and list methods follow GS2's semantics; a mutating list method on a
+and list methods follow GS2's semantics. A mutating list method on a
         VarRef base writes the list back to the flag store."""
         args = [self.eval(a) for a in node.args]
         name = node.name.lower()
@@ -1147,7 +1147,7 @@ class ResumableExecution:
     """One GS1 event execution that can suspend at `sleep` and be resumed
     later by the host -- the opt-in fix for the break-the-loop tradeoff
     documented on Interpreter.__init__ (interp.py:~62). Construct via
-    Interpreter.run_event_resumable(); don't build directly.
+Interpreter.run_event_resumable(). Do not build it directly.
 
     Design: GServer-v2 (GS1Visitor.cpp) implements this with an EXPLICIT
     sleep call-stack (`m_sleepCallStack`, a vector of (parse-node, child-index)
@@ -1161,7 +1161,7 @@ class ResumableExecution:
     calling `next()` on it again resumes exactly after the `sleep` statement,
     with loop counters and the with()-source/call-stack (both plain Python
     locals or ctx.this_obj, restored by the paused try/finally on resume)
-    intact. No hand-rolled position bookkeeping needed; statement-level
+intact. No manual position bookkeeping is necessary. Statement-level
     granularity comes for free from `sleep` only ever appearing as its own
     statement (matches upstream: "statement boundaries are fine, no need for
     sub-expression resume").
@@ -1394,7 +1394,9 @@ def _base64_sha256(s):
 
 
 def _getflagkeys(interp, a):
-    """Iterate flag store keys matching a prefix; return numeric array.
+    """Iterate through flag store keys that match a prefix.
+
+    Return a numeric array.
     
     The prefix may start with a storage qualifier (this./thiso./client./clientr./server./serverr.).
     Unqualified defaults to the player (client) flag store.
@@ -1532,7 +1534,7 @@ _PURE = {
 
 # -- convenience entry points ----------------------------------------------
 def run(source: str, host: Host = None, ctx: Context = None) -> Context:
-    """Parse and execute a GS1 script; return the resulting context."""
+    """Parse and run a GS1 script. Return the resulting context."""
     ctx = ctx or Context(host or MemoryHost())
     Interpreter(ctx).run(parse(source))
     return ctx
@@ -1547,7 +1549,7 @@ def run_event(source: str, event: str, host: Host = None, ctx: Context = None) -
 def run_event_resumable(source: str, event: str, host: Host = None,
                          ctx: Context = None) -> ResumableExecution:
     """Opt-in entry point: like run_event, but `sleep` suspends instead of
-    breaking its loop; drive the returned ResumableExecution's .resume() to
+breaking its loop. Call .resume() on the returned ResumableExecution to
     continue past each sleep. See ResumableExecution / Interpreter.__init__."""
     ctx = ctx or Context(host or MemoryHost())
     return Interpreter(ctx).run_event_resumable(parse(source), event)

@@ -6,7 +6,7 @@ receive over the wire -- with additions from the reversed official
 interpreter where that header is simply missing an opcode (OP_DYNAMIC_ADD).
 
 Values with no case in opcode::OpcodeToString() are commented "reserved" or
-left unnamed in the C++ source; we still assign them a symbolic name here
+left unnamed in the C++ source. We still assign them a symbolic name here
 (OP_<n>) purely so the disassembler has something to print. Do not treat an
 unnamed op's presence in this table as evidence of understood semantics.
 

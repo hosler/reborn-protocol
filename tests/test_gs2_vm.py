@@ -82,7 +82,7 @@ def test_conv_to_object_preserves_unset_array_targets():
 
 
 def _baseline_id(path: str) -> str:
-    """Relative id for a baseline path, against whichever root it's under."""
+    """Return the relative ID for a baseline path under either root."""
     for root in (BASELINES_ROOT, VENDORED_BASELINES_ROOT):
         if os.path.commonpath([os.path.abspath(path), os.path.abspath(root)]) == os.path.abspath(root):
             return os.path.relpath(path, root)

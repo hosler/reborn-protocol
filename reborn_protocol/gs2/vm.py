@@ -18,8 +18,9 @@ Semantics are derived from (in priority order, per the build ground rules):
    stack layout wins.
 
 Safety contract (QA requirement): nothing raises out of the VM. Unknown
-opcodes are logged once and skipped; handler exceptions are logged once per
-site and abort only the current event call; every run is bounded by
+the VM logs unknown opcodes once and skips them. The VM logs handler exceptions
+once per site. An exception stops only the current event call. The instruction
+budget limits every run to
 max_ops. Coverage (ops seen/implemented/skipped, builtins called/missing)
 is tracked on the class so a corpus run can print an honest progress report.
 """
@@ -89,7 +90,7 @@ def _value_in_range(value: float, lo: float, hi: float, mode: int) -> bool:
 
 
 class GS2Host:
-    """Host interface the VM calls out to. Default implementation is inert;
+    """Host interface that the VM calls. The default implementation is inert.
     pyReborn provides a real bridge (routing to the same client host surface
     the GS1 engine uses) in phase 3."""
 
@@ -172,7 +173,7 @@ class _NameVivifyRef(LValue):
     name. Write semantics match GS2Engine's variable collection: the first
     member WRITE auto-creates the holder object and assigns it through the
     normal scope chain (temps -> this -> globals, honoring with-scope and
-    host this-object claims via _assign_name); reads before any write yield
+host this-object claims through _assign_name). Reads before any write yield
     None and create nothing. Without this, `tmp.node = <treenode>` in the
     live Login serverlist builder silently dropped every node id/sortgroup/
     icon write (tmp is a plain identifier there, not the temp. prefix)."""
@@ -199,7 +200,7 @@ def _csv_tokens(value: str) -> Optional[List[str]]:
     """Official OP_CONV_TO_OBJECT string-property rule
     (TScriptStackEntry::switchTypeObject, quattroplay): a string-valued
     property converts to a temporary token ARRAY iff it contains a comma or
-    is fully quoted (first and last char '"'); any other string stays a
+is fully quoted (first and last char '"'). Any other string stays a
     non-object (null-object entry). The token dialect is the shared engine
     CSV format (gs1_csv_split). The conversion result is a TEMP -- writes
     into it never reach the source variable -- which a fresh list models
@@ -272,7 +273,7 @@ def _looks_numeric(v: Any) -> bool:
 
 class GS2VM:
     """One VM instance per loaded script (weapon/npc/class/gani). All state
-    (this-object, per-frame temps) is per-instance; globals come from the
+(this-object, per-frame temps) is per-instance. Globals come from the
     host (or a per-VM dict when no host provides one)."""
 
     # ---- class-level coverage accounting (aggregated across instances) ----
@@ -880,7 +881,7 @@ class GS2VM:
         unset -- that is precisely the shape the compiler emits for an
         anonymous `function(){...}`. Restricting it to this-objects keeps a
         miss on some unrelated host object (`player.onwall`) reading None as
-        before. has() is only the cheap gate; _ScriptFnRef.get() re-checks
+before. has() is only the cheap gate. _ScriptFnRef.get() checks again
         the real stored value, so a host object with a computed member it
         does not report through has() still wins.
         """

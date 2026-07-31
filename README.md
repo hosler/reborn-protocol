@@ -1,10 +1,11 @@
 # reborn-protocol
 
-Shared protocol library for Reborn Online server and client implementations.
+This library contains the shared protocol for Reborn Online server and client
+implementations.
 
 ## Overview
 
-This library provides common protocol components used by both:
+The server and client use these common protocol components:
 - **pygserver** - Python game server
 - **pyReborn** - Python game client
 
@@ -33,7 +34,7 @@ This library provides common protocol components used by both:
 - `SVO` - Server → ListServer packet IDs (Server Output) - 33 types
 - `SVI` - ListServer → Server packet IDs (Server Input) - 26 types
 
-Total: **500+ packet and property types defined**
+The library defines **500+ packet and property types**.
 
 ### Codec (`reborn_protocol.codec`)
 
@@ -99,7 +100,7 @@ message = reader.read_gstring()
 
 ### G-Type Encoding
 
-All values use +32 offset for printable ASCII range:
+All values use a +32 offset for the printable ASCII range:
 
 - **GCHAR**: 1 byte, value + 32 (range 0-223)
 - **GSHORT**: 2 bytes, `((v >> 7) + 32, (v & 0x7F) + 32)` (range 0-16383)
@@ -114,13 +115,13 @@ ENCRYPT_GEN_5 uses a Linear Congruential Generator (LCG):
 iterator = (iterator * 0x8088405 + key) mod 2^32
 ```
 
-Encryption limit varies by compression type:
+The compression type sets the encryption limit:
 - UNCOMPRESSED: 48 bytes
 - ZLIB/BZ2: 16 bytes
 
 ### Packet Framing
 
-Packets are framed with a 2-byte big-endian length prefix:
+The codec frames packets with a 2-byte big-endian length prefix:
 
 ```
 [LENGTH:2 bytes][PACKET_DATA:LENGTH bytes]
@@ -128,4 +129,4 @@ Packets are framed with a 2-byte big-endian length prefix:
 
 ## License
 
-MIT License - see LICENSE file.
+The MIT License applies. See the LICENSE file.

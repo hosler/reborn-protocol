@@ -1,14 +1,14 @@
 """GS1 value coercion -- the ONE home for GS1's coercion policy.
 
 GS1 is loosely typed: a value is a number (float), a string, or an array. The
-C++ engine's GameValue can even hold a number AND a string simultaneously; we
+C++ engine's GameValue can even hold a number AND a string simultaneously. We
 model the common single-type case and coerce on demand. See memory:
 gs1-python-port.
 
 Every GS1 coercion rule lives here and nowhere else, so a new call site picks
 a named rule instead of re-deriving one. The GS2 engine has its OWN home
 (``reborn_protocol.gs2.values``) whose rules deliberately differ -- two
-engines, two reversed sources; never unify them:
+engines with two reversed sources. Never unify them:
 
 ===================== ================================ ======================
 rule                  GS1 (this module)                GS2 (gs2.values)
@@ -118,7 +118,7 @@ _DOUBLE_EPS = 2.220446049250313e-16
 def is_double_zero(x: float) -> bool:
     """GServer-v2's DoubleIsZero: used by GS1's unary `!` (NOT a flag test --
     `!` always converts its operand to a number and tests it near zero, even
-    though `if(number)` itself is never truthy; this is intentionally not
+though `if(number)` itself is never truthy. This behavior is intentionally not
     De Morgan-consistent with `if`/`&&`/`||`)."""
     return abs(x) < _DOUBLE_EPS
 
@@ -131,7 +131,7 @@ def gs1_num(v) -> float:
     where this.s holds "25" is 3, not 28) even though `strtofloat()`/`to_num`
     explicitly parse the same text on request. Bare numeric LITERAL tokens
     never hit this function at all -- the parser already turns them into a
-    real float (ast.Num) at parse time, so they're unaffected."""
+real float (ast.Num) at parse time, so the rewrite does not affect them."""
     if isinstance(v, bool):
         return 1.0 if v else 0.0
     if isinstance(v, (int, float)):

@@ -1,7 +1,7 @@
 """GS1 parser — recursive-descent port of GServer-v2's GS1Parser.g4.
 
 Consumes the token list from lexer.tokenize() and produces an AST (ast.py).
-Precedence and rule shapes follow the ANTLR grammar; statement-level
+Precedence and rule shapes follow the ANTLR grammar. Statement-level
 assignment vs. expression is resolved with backtracking (the grammar relies on
 ANTLR trying assignmentStatement before expression, and '=' doubles as the
 equality operator inside expressions).
@@ -660,7 +660,7 @@ class Parser:
     def _parse_method_chain(self, node):
         """`.method(args)` chain on a call result (era GS2-ism:
         findWeaponNPC("-System").showFloat("*Cured!")). Backtracks if the
-        dot isn't followed by a call."""
+        dot does not have a call after it."""
         while (self.at("TOKEN_PERIOD")
                and self.peek(1).type == "IDENTIFIER"
                and self.peek(2).type == "TOKEN_PAREN_LEFT"):

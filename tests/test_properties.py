@@ -12,7 +12,7 @@ Sections:
   1. Single-value round trips for every G-type writer/reader pair, over its
      documented legal domain.
   2. Mixed-type sequences (catches positional/consumption bugs that a
-     single-value round trip can't -- e.g. a writer/reader pair that
+     single-value round trip cannot -- e.g. a writer/reader pair that
      round-trips fine in isolation but consumes the wrong number of bytes
      when something else follows it).
   3. Encrypt<->decrypt round trips for every ENCRYPT_GEN_* codec, using
@@ -221,7 +221,7 @@ def test_gen3_send_wire_format_self_consistent(data, key):
     """Gen3Codec only implements the client -> server *encode* direction;
     the matching decrypt (stripping the inserted filler byte) happens
     server-side in GServer/pygserver, not in this library (see the class
-    docstring). So there's no recv_packet counterpart to round-trip
+    docstring). Thus, no recv_packet counterpart exists to round-trip
     against here -- instead, verify send_packet's wire format is
     self-consistent by independently recomputing the documented insertion
     position and reversing it by hand."""

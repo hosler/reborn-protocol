@@ -7,7 +7,7 @@ room controller (`npcs[n].save[1]==13`) from an arcade cabinet
 (`npcs[n].save[0]==10`), so every cabinet was unreachable.
 
 Single-indexed-part references (`tiles[x,y]`, `players[i].x`) are unaffected;
-they are pinned here so the collection change can't quietly alter them.
+these tests pin them so the collection change cannot alter them without notice.
 """
 
 from reborn_protocol.gs1.parser import parse

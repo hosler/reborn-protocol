@@ -17,7 +17,7 @@ m_sleepCallStack).
 The bottom of this file (TestOracleSleepResume) cross-checks the design
 against the REAL GServer-v2 engine (GServer-v2/bin/Oracle, skipped if not
 built): unlike the shared tests/gs1_oracle_corpus.cases/test_gs1_oracle.py
-harness (which fires every event through the SYNC path and so can't exercise
+harness (which fires every event through the SYNC path and thus cannot exercise
 resumable semantics), it drives our ResumableExecution the same way a
 resumable host would -- "timeout" events call .resume() on the still-pending
 execution; every other event runs fresh via run_event on the same shared ctx

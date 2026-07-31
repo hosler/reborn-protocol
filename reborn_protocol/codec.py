@@ -1,8 +1,8 @@
 """
 reborn_protocol.codec - Packet encoding/decoding utilities
 
-Provides classes for reading and writing Reborn protocol data types,
-packet framing, and the Gen5 codec for encryption/compression.
+This module contains classes that read and write Reborn protocol data types.
+It also contains packet framing and the Gen5 encryption and compression codec.
 
 G-Type Encoding:
 - GCHAR: Single byte with value + 32 (printable ASCII range)
@@ -35,8 +35,11 @@ MAX_PACKET_LEN = 0xFFFF
 
 
 def _frame(payload: bytes) -> Optional[bytes]:
-    """Length-prefix `payload` (u16 big-endian), or None if it's too big to
-    fit the length field. Callers should drop the send on None."""
+    """Add a u16 big-endian length prefix to `payload`.
+
+    If the payload does not fit the length field, return None. If this function
+    returns None, callers must not send the payload.
+    """
     if len(payload) > MAX_PACKET_LEN:
         logger.warning("dropping oversize packet bundle (%d bytes > %d)",
                         len(payload), MAX_PACKET_LEN)
@@ -52,10 +55,10 @@ class PacketReader:
     """
     Utility for reading packet data with Reborn protocol encodings.
 
-    All G-type values are encoded with +32 offset for printable ASCII.
+    The reader decodes all G-type values with a +32 printable ASCII offset.
 
     `encoding` is the single-byte codepage used for text. The game-server
-    session's default is latin-1; the list-server session's text is cp1252
+    session's default is latin-1. The list-server session's text is cp1252
     (0x92 is a right single quote there, not U+0092).
     """
 
@@ -132,7 +135,7 @@ class PacketReader:
         Encoding: 4/7/7/7/7-bit big-endian packing, each byte -32 before
         folding (reference: gs2lib CString::readGInt5, CString.cpp:1644 —
         that version folds raw bytes and subtracts a single 0x4081020
-        constant; this is the algebraically equivalent per-byte-offset form,
+        constant. This is the algebraically equivalent per-byte-offset form,
         masked to 32 bits to match its unsigned int return).
         """
         if self.pos + 4 >= len(self.data):
@@ -212,7 +215,7 @@ class PacketBuilder:
     """
     Utility for building packet data with Reborn protocol encodings.
 
-    All G-type values are encoded with +32 offset for printable ASCII.
+    The builder encodes all G-type values with a +32 printable ASCII offset.
     """
 
     def __init__(self):
@@ -363,7 +366,7 @@ class PacketBuffer:
     """
     Buffer for accumulating TCP data and extracting complete packets.
 
-    Reborn packets are framed with a 2-byte big-endian length prefix.
+    The protocol frames Reborn packets with a 2-byte big-endian length prefix.
     """
 
     def __init__(self):
@@ -415,7 +418,7 @@ class Gen5Codec:
     Handles packet encryption/decryption with dynamic compression
     selection based on data size. Used by pyReborn client.
 
-    `compression` names the outbound compression policy; it defaults to the
+    `compression` names the outbound compression policy. It defaults to the
     game-server one. pyReborn's list-server session passes
     LIST_SERVER_COMPRESSION, which never emits bz2.
     """
@@ -605,7 +608,7 @@ class ServerCodec:
             return None
 
     def reset_decode_state(self) -> None:
-        """Expect a plain first packet; callers must separately call set_key()."""
+        """Expect a plain first packet. Callers must separately call set_key()."""
         self._first_decode = True
 
 
@@ -621,7 +624,7 @@ class Gen3Codec:
     IPacketHandler.h/CFileQueue.cpp):
 
     - client -> server: each packet (WITHOUT its trailing newline) gets ONE
-      byte INSERTED at pos = (iterator & 0xFFFF) % len(packet_with_insertion);
+      byte INSERTED at pos = (iterator & 0xFFFF) % len(packet_with_insertion).
       iterator advances once per packet (iterator = iterator*0x8088405 + key).
       The server strips it in parsePacketsFromBundle via CEncryption::decrypt
       (removeI at pos computed over the received length). Packets are then

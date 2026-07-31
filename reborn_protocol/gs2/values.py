@@ -587,7 +587,7 @@ def gs2_compare(a: Any, b: Any) -> int:
     host boundary cannot type-distinguish "object-typed property, currently
     null" from "no such property". KEPT DIVERGENCE (test-locked): such a
     read compares 0.0 vs strtofloat(s) -- FALSE for any string strtod
-    doesn't read as zero -- where the reference's Null row would say equal
+does not read as zero -- where the reference's Null row would say equal
     to EVERY string. Confined to engine-property nulls, un-modelable
     without typed host misses, and it fails SAFE: the extra branches are
     NOT taken.

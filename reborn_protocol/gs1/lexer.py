@@ -550,7 +550,7 @@ class Lexer:
     # Expression-like modes (E, V, D, M share most expression scanning)
     # =====================================================================
     def _expr_in_op(self):
-        """Match ' in ' operator; returns Token or None (caller handles WS)."""
+        """Match the ' in ' operator. Return a Token or None (caller handles WS)."""
         if self.text.startswith(" in ", self.pos):
             self.pos += 4
             return Token("OP_IN", " in ", self.pos - 4)

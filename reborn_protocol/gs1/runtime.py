@@ -78,7 +78,7 @@ class Host:
         return False
 
     def call_command(self, name, args, ctx) -> None:
-        """Perform a side-effecting command (say, setimg, hide, ...)."""
+        """Run a command that has a side effect (say, setimg, hide, ...)."""
 
     def call_function(self, name, args, ctx):
         """Evaluate a built-in function not handled by the interpreter core.

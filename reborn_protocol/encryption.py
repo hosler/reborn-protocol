@@ -1,12 +1,12 @@
 """
 reborn_protocol.encryption - ENCRYPT_GEN_5 implementation
 
-Provides XOR-based encryption/decryption and compression utilities
-for the Reborn Online protocol (versions 2.22 to 6.037).
+This module contains XOR encryption, decryption, and compression utilities for
+the Reborn Online protocol (versions 2.22 to 6.037).
 
-The encryption uses a Linear Congruential Generator (LCG) to produce
-a pseudorandom byte stream that is XORed with the data. The same
-algorithm is used for both encryption and decryption.
+The encryption uses a Linear Congruential Generator (LCG) to make a
+pseudorandom byte stream. The algorithm applies XOR to the stream and the data.
+Encryption and decryption use the same algorithm.
 """
 
 import struct
@@ -50,7 +50,7 @@ class RebornEncryption:
 
     def __init__(self, key: int = 0):
         """
-        Initialize encryption with key.
+        Start the encryption state with a key.
 
         Args:
             key: Encryption key from login packet (0-127)
@@ -90,7 +90,7 @@ class RebornEncryption:
         Encrypt data using XOR cipher.
 
         The encryption XORs data with bytes from the LCG state.
-        Every 4 bytes, the LCG state is advanced:
+        After every 4 bytes, the cipher advances the LCG state:
             iterator = (iterator * multiplier + key) mod 2^32
 
         The number of bytes encrypted depends on the limit setting:
@@ -146,9 +146,9 @@ class RebornEncryption:
 
 def compress_data(data: bytes) -> Tuple[bytes, int]:
     """
-    Compress data using appropriate method based on size.
+    Compress data with the method for its size.
 
-    Compression method is selected based on data size:
+    The data size selects the compression method:
     - <= 55 bytes: No compression (UNCOMPRESSED)
     - <= 8192 bytes: zlib compression (ZLIB)
     - > 8192 bytes: bz2 compression (BZ2)
@@ -169,7 +169,7 @@ def compress_data(data: bytes) -> Tuple[bytes, int]:
 
 class CompressionPolicy:
     """
-    Which compression types a GEN_5 session is allowed to emit outbound.
+    Define the compression types that a GEN_5 session can send.
 
     The policy is part of the session's wire contract, not a local
     optimisation: `limit_from_type` derives the encryption limit from the type

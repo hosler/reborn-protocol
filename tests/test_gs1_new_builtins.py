@@ -120,7 +120,7 @@ class TestPasswordMatches:
         assert result is True
     
     def test_wrong_password(self):
-        """Test that an incorrect password doesn't match."""
+        """Test that an incorrect password does not match."""
         ctx = run("setstring this.hashed, 9S+9MrKzuG/4jvbEkGKChfSCrxXdyylUH5S89Saj9sc=; setstring this.wrong, wrongpass;")
         result = probe(ctx, "passwordmatches(#s(this.hashed), #s(this.wrong))")
         assert result is False
