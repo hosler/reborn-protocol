@@ -1025,13 +1025,28 @@ before. has() is only the cheap gate. _ScriptFnRef.get() checks again
         self._write_ref(target, value, frame)
 
     def _op_func_params_end(self, frame, instr):
-        # param names were pushed in reverse declaration order, so pop order
-        # is declaration order; bind against caller args positionally.
-        # gs2test pushes bare VarRefs, but the official compiler pushes each
-        # param as a temp.<name> reference (OP_TEMP; OP_TYPE_VAR;
-        # OP_MEMBER_ACCESS -> LValue on the frame temps object) -- seen in
-        # every live Login-server weapon. Bind through the reference in that
-        # case or all params silently become None.
+        # ONE push convention, both compilers (official and gs2test): every
+        # argument/parameter list is pushed in REVERSE source/declaration
+        # order, so _pop_args returns declaration order here and source
+        # order at call sites. Binding is therefore a plain positional zip.
+        # Reference: massTempAssign (src/TScriptMachine.cpp:4001-4116) pairs
+        # the name on top of the stack with the value on top of the arg
+        # array -- with both lists reverse-pushed that top-aligned pairing
+        # IS declaration-order-to-source-order. The engine's external entry
+        # agrees: stackAddTokens (src/TScriptMachine.cpp:3814-3826) pushes
+        # params[n-1..0] so params[0] (first source arg) lands on top and
+        # pops first. Proof of the reverse push: a compiled
+        # `function onKeyPressed(code, key)` prologue carries VAR 'Key' then
+        # VAR 'code' (live capture), and gs2test emits the same shape.
+        # Do NOT reverse either list for any prologue style -- an
+        # LValue-only reversal here inverted every internal call in
+        # temp.<name>-style weapons and collapsed Login Mobile's UI
+        # (2026-08-05).
+        # Two prologue styles exist for the SAME rule: bare VarRefs
+        # (OP_TYPE_VAR per param) and temp.<name> references (OP_TEMP;
+        # OP_TYPE_VAR; OP_MEMBER_ACCESS -> LValue on the frame temps
+        # object). Bind through the reference in the LValue case or all
+        # params silently become None.
         names = self._pop_args(frame)
         for i, nv in enumerate(names):
             value = frame.args[i] if i < len(frame.args) else None
