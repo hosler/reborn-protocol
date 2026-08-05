@@ -16,6 +16,7 @@ resolved to byte offsets for display.
 """
 from __future__ import annotations
 
+import re
 import struct
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
@@ -33,6 +34,45 @@ JUMP_OPS = frozenset({
 
 class GS2DecodeError(ValueError):
     pass
+
+
+_STRTOD_PREFIX = re.compile(
+    r"[ \t\r\n\f\v]*[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
+_HEX_PREFIX = re.compile(r"[0-9a-fA-F]+")
+
+
+def strtofloat(text: str) -> float:
+    """The reference loader's conversion for textual (0xF6) number literals.
+
+    The mobile reference feeds the operand text to strtofloat
+    (TScript.cpp:257-270 -> TInitStatics.cpp:4335-4386): "true" -> 1.0,
+    "false" -> 0.0, a "0x" prefix through strtoul(16), and everything else
+    through strtod -- and when strtod consumes NOTHING the result is -1.0
+    (DOUBLE_004023f0, TInitStatics.cpp:1269), not 0.0. strtod also parses
+    the longest valid numeric PREFIX, so trailing junk does not void the
+    number ("1.5x" -> 1.5).
+
+    Real content hits the unparseable branch: LTTP's -Player/Movement
+    weapon carries the literal '--0.5' (the compiler textualized a double
+    unary minus), which float() refuses -- an earlier blanket 0.0 fallback
+    here silently mis-decoded it; the reference reads -1.0.
+    """
+    if not text:
+        return 0.0
+    if text == "true":
+        return 1.0
+    if text == "false":
+        return 0.0
+    if text.startswith("0x"):
+        m = _HEX_PREFIX.match(text[2:])
+        return float(int(m.group(0), 16)) if m else 0.0
+    m = _STRTOD_PREFIX.match(text)
+    if m is None:
+        return -1.0
+    try:
+        return float(m.group(0))
+    except ValueError:  # pragma: no cover - prefix regex should not fail
+        return -1.0
 
 
 @dataclass
@@ -107,11 +147,10 @@ def _parse_typed_operand(op: Optional[Op], marker: int, code: bytes,
             raise GS2DecodeError(f"unterminated float literal at offset {pos}")
         text = code[pos:end].decode("ascii", errors="replace")
         pos = end + 1
-        try:
-            fval = float(text)
-        except ValueError:
-            fval = 0.0
-        operand = Operand("float", marker, "cstr", fval, raw_text=text)
+        # strtofloat, not float(): the reference's loader semantics (prefix
+        # parse, and -1.0 -- not 0.0 -- for unparseable text like '--0.5').
+        operand = Operand("float", marker, "cstr", strtofloat(text),
+                          raw_text=text)
     operand.nbytes = pos - start
     return operand, pos
 

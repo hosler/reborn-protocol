@@ -179,3 +179,35 @@ def test_marker_byte_is_never_an_instruction():
 
     # a record with no preceding instruction is consumed and dropped
     assert decode(b"\xf3\x05") == []
+
+
+def test_f6_text_literal_uses_reference_strtofloat_semantics():
+    """0xF6 textual number literals go through the reference loader's
+    strtofloat (TScript.cpp:257-270 -> TInitStatics.cpp:4335-4386), NOT
+    Python float(): strtod parses the longest numeric prefix, and text
+    strtod cannot consume at all reads -1.0 (DOUBLE_004023f0,
+    TInitStatics.cpp:1269) -- not 0.0. Live content depends on the
+    unparseable branch: the LTTP server's -Player/Movement weapon carries
+    the literal '--0.5' (a textualized double unary minus)."""
+    from reborn_protocol.gs2.disasm import strtofloat
+
+    def lit(text):
+        # OP_TYPE_NUMBER (0x14) + F6 record; operand.value is the decode
+        instrs = decode(b"\x14\xf6" + text.encode() + b"\x00\x07")
+        assert instrs[0].operand.raw_text == text
+        return instrs[0].operand.value
+
+    assert lit("-1.5") == -1.5
+    assert lit("3.5") == 3.5
+    assert lit(".2") == 0.2
+    assert lit("--0.5") == -1.0      # unparseable -> reference sentinel
+    assert lit("-.4") == -0.4
+    assert lit("1.5x") == 1.5        # strtod prefix parse
+    assert lit("1e2") == 100.0
+    # helper-level cases the loader shares (TInitStatics.cpp:4348-4376)
+    assert strtofloat("true") == 1.0
+    assert strtofloat("false") == 0.0
+    assert strtofloat("0x10") == 16.0
+    assert strtofloat("") == 0.0
+    assert strtofloat("-") == -1.0
+    assert strtofloat("abc") == -1.0
