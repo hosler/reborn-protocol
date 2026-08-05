@@ -70,6 +70,24 @@ function fireMissing() {
 }
 """
 
+CASE_COLLISION_PROVIDER_SRC = """
+function onCreated() {
+  Games = this;
+}
+
+public function startGame(game) {
+  this.started = game;
+  return 1;
+}
+"""
+
+CASE_COLLISION_CALLER_SRC = """
+function onCreated() {
+  this.games = {"local row"};
+  this.result = Games.startGame("Game_TicTacToe");
+}
+"""
+
 
 def _compile(source: str) -> bytes:
     with tempfile.TemporaryDirectory() as d:
@@ -133,6 +151,29 @@ def test_public_function_reached_through_a_published_this():
     assert caller.this.get("viapublic") == 1.0
     # ...instead of the same-named host builtin stub.
     assert "modifyclientr" not in host.builtin_calls
+
+
+@needs_compiler
+def test_published_object_name_wins_case_distinct_member_during_method_call():
+    """Pin the compiler shape used by a menu calling another weapon.
+
+    `Games.startGame(...)` emits OP_TYPE_VAR/OP_CONV_TO_OBJECT followed by
+    member access and OP_CALL.  The uppercase published object must not be
+    shadowed by the caller's separate lowercase `this.games` array, and the
+    mixed-case public function must remain callable through its folded key.
+    """
+    host = _SharedHost()
+    provider = GS2VM(_compile(CASE_COLLISION_PROVIDER_SRC),
+                     name="provider", host=host)
+    caller = GS2VM(_compile(CASE_COLLISION_CALLER_SRC),
+                   name="caller", host=host)
+
+    provider.call("onCreated")
+    caller.call("onCreated")
+
+    assert provider.this.get("started") == "Game_TicTacToe"
+    assert caller.this.get("result") == 1.0
+    assert "startgame" not in host.builtin_calls
 
 
 @needs_compiler

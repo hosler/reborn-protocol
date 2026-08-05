@@ -19,7 +19,8 @@ from .values import (
     gs2_to_num, gs2_truthy, strtofloat, resolve, casefold, copy_value,
 )
 from .vm import (
-    GS2VM, GS2Host, GS2ScriptFunction, NOT_HANDLED, array_index, printf_format,
+    GS2VM, GS2Host, GS2ScriptFunction, NOT_HANDLED, VMCoroutineWait,
+    array_index, printf_format,
 )
 
 __all__ = [
@@ -29,6 +30,6 @@ __all__ = [
     "GS2_NULL", "GS2Object", "LValue", "VarRef", "to_num", "to_str",
     "to_bool", "gs2_eq", "gs2_to_num", "gs2_truthy", "strtofloat", "resolve",
     "casefold", "copy_value",
-    "GS2VM", "GS2Host", "GS2ScriptFunction", "NOT_HANDLED", "array_index",
-    "printf_format",
+    "GS2VM", "GS2Host", "GS2ScriptFunction", "NOT_HANDLED",
+    "VMCoroutineWait", "array_index", "printf_format",
 ]

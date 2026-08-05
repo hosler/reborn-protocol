@@ -294,6 +294,11 @@ def to_str(v) -> str:
         return fmt_num(float(v))
     if isinstance(v, (list, tuple)):
         return ",".join(to_str(x) for x in v)
+    if isinstance(v, GS2Object):
+        member_name = v.get("name")
+        if member_name is not None and member_name is not v:
+            return to_str(member_name)
+        return v.name
     return str(v)
 
 

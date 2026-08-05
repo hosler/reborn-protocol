@@ -95,6 +95,11 @@ def test_object_vs_string_compares_the_object_name():
     assert gs2_compare(obj, "zzz") == -gs2_compare("zzz", obj)
 
 
+def test_object_string_conversion_uses_the_object_name():
+    obj = GS2Object("Skills_Games_TicTacToe")
+    assert to_str(obj) == "Skills_Games_TicTacToe"
+
+
 def test_literal_null_vs_string_is_a_number_compare_not_equal_to_any_string():
     """Rows :1452/:1476 DO say "a nullptr object equals any string" -- but
     compare() resolves both entries first (:1435/:1441), and resolve()

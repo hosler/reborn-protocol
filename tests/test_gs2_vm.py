@@ -18,7 +18,8 @@ import os
 
 import pytest
 
-from reborn_protocol.gs2 import GS2VM, GS2Object, printf_format, gs2_eq, to_str
+from reborn_protocol.gs2 import (GS2VM, GS2Object, VMCoroutineWait,
+                                printf_format, gs2_eq, to_str)
 from reborn_protocol.gs2.container import GS2Container
 from reborn_protocol.gs2.values import GS2_NULL, LValue, VarRef, fmt_num, gs2_compare
 from reborn_protocol.gs2.vm import _Frame
@@ -746,6 +747,53 @@ def test_construction_block_bytecode_end_to_end():
     assert btn.get("tag") == 9          # this.x landed on the new object
     assert vm.this.get("tag") is None   # not on the script object
     assert host.calls == [(btn, ["child"])]  # dispatched with with-target
+
+
+def test_host_builtin_wait_suspends_at_call_until_resumed():
+    from reborn_protocol.gs2.container import FunctionEntry
+    from reborn_protocol.gs2.vm import GS2Host, NOT_HANDLED
+
+    class _Wait(VMCoroutineWait):
+        def __init__(self):
+            self.done = False
+
+        def ready(self):
+            return self.done
+
+        def result(self):
+            return True
+
+    wait = _Wait()
+    suspendable_calls = []
+
+    class _Host(GS2Host):
+        def call_builtin(self, vm, name, args, obj=None):
+            suspendable_calls.append(vm.call_is_suspendable)
+            return wait if name == "awaitclass" else NOT_HANDLED
+
+    code = bytes([
+        0x17,                    # OP_TYPE_ARRAY
+        0x16, 0xF0, 0x00,       # OP_TYPE_VAR 'awaitclass'
+        0x06,                    # OP_CALL
+        0xB4,                    # OP_THIS
+        0x16, 0xF0, 0x01,       # OP_TYPE_VAR 'continued'
+        0x23,                    # OP_MEMBER_ACCESS
+        0x14, 0xF3, 0x01,       # OP_TYPE_NUMBER 1
+        0x32,                    # OP_ASSIGN
+        0x07,                    # OP_RET
+    ])
+    vm = GS2VM(GS2Container(
+        functions=[FunctionEntry("event", 0)],
+        strings=["awaitclass", "continued"], code=code), host=_Host())
+
+    event = vm.iter_call("event")
+    assert next(event) is wait
+    assert suspendable_calls == [True]
+    assert vm.this.get("continued") is None
+    wait.done = True
+    with pytest.raises(StopIteration):
+        next(event)
+    assert vm.this.get("continued") == 1.0
 
 
 # --- official-compiler param binding (temp.<name> LValues) ----------------

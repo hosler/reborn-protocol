@@ -51,6 +51,20 @@ logger = logging.getLogger(__name__)
 #: sentinel returned by hosts for "builtin not handled here"
 NOT_HANDLED = object()
 
+
+class VMCoroutineWait:
+    """A host-builtin result that pauses coroutine execution at the call."""
+
+    def ready(self) -> bool:
+        raise NotImplementedError
+
+    def pump(self) -> None:
+        """Record one host coroutine-pump cycle."""
+
+    def result(self) -> Any:
+        """Return the builtin value once the wait is ready."""
+        return 0.0
+
 #: cap on any single array allocation/index-driven growth (arr[100000000]=1
 #: must not try to allocate a 100M-element list). Applied wherever a script
 #: index controls array size: OP_ARRAY_ASSIGN, OP_OBJ_REPLACESTRING.
@@ -518,6 +532,9 @@ class GS2VM:
                     call_args = [self.deref(a, frame) for a in self._pop_args(frame)]
                     value = yield from self._gcall_target(
                         target, call_args, frame, coro_mode)
+                    if coro_mode and isinstance(value, VMCoroutineWait):
+                        yield value
+                        value = value.result()
                     frame.stack.append(value)
                     result = None
                 else:
@@ -841,8 +858,21 @@ class GS2VM:
         raw = frame.stack.pop() if frame.stack else None
         if isinstance(raw, (VarRef, str)):
             name = raw.name if isinstance(raw, VarRef) else raw
-            # with-scope member first (GS2Engine), then normal chain
-            v = self._lookup(name, frame)
+            # Script identifiers preserve case even though object member
+            # storage is case-insensitive.  An uppercase published script
+            # object and a lowercase member may therefore coexist:
+            # `Games = this` beside `this.games = {...}`.  The ordinary
+            # lookup folds both spellings and would select the member first.
+            # Preserve the source spelling at the object-conversion boundary,
+            # where the compiler still gives it to us, by preferring the
+            # published global for a case-distinct name.
+            global_value = self.globals.get(name.lower())
+            if (isinstance(raw, VarRef) and name != name.lower()
+                    and isinstance(global_value, GS2Object)):
+                v = global_value
+            else:
+                # with-scope member first, then the normal variable chain
+                v = self._lookup(name, frame)
             if v is None and self.host is not None:
                 v = self.host.get_object(name)
             if isinstance(v, (list, GS2Object)):
@@ -1631,7 +1661,17 @@ before. has() is only the cheap gate. _ScriptFnRef.get() checks again
             name = target.name.lower()
             if self.has_function(name):
                 return (yield from self._gcall_script(name, args, coro_mode))
-        return self._call_target(target, args, frame)
+        previous = getattr(self, "_call_coro_mode", False)
+        self._call_coro_mode = coro_mode
+        try:
+            return self._call_target(target, args, frame)
+        finally:
+            self._call_coro_mode = previous
+
+    @property
+    def call_is_suspendable(self) -> bool:
+        """Whether the host callback currently running may yield a wait."""
+        return getattr(self, "_call_coro_mode", False)
 
     def _gcall_script(self, name: str, args: List[Any], coro_mode: bool):
         idx = self.functions.get(name)
