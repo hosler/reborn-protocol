@@ -1,0 +1,11 @@
+public function awaitEvent(target, event, timeout) {
+  temp.saved = 7;
+  temp.result = waitfor(target, event, timeout);
+  this.result = temp.result;
+  this.saved = temp.saved;
+  this.handler_seen = this.handled;
+  this.continued++;
+  return temp.result;
+}
+function onReady(value) { this.handled = value; }
+public function fire(target, event) { target.trigger(event, 42); }

@@ -52,6 +52,19 @@ logger = logging.getLogger(__name__)
 NOT_HANDLED = object()
 
 
+class _ObjectString(str):
+    """String coercion retaining the source object for event subscriptions.
+
+    The compiler's waitfor signature emits CONV_TO_STRING for its target.
+    Keep ordinary string behavior while allowing WAITFOR to recover identity.
+    """
+
+    def __new__(cls, obj):
+        value = super().__new__(cls, to_str(obj))
+        value.target = obj
+        return value
+
+
 class VMCoroutineWait:
     """A host-builtin result that pauses coroutine execution at the call."""
 
@@ -124,6 +137,10 @@ class GS2Host:
 
     def sleep(self, vm: "GS2VM", seconds: float) -> None:
         """OP_SLEEP / sleep(n). Default: no-op (the VM never blocks)."""
+
+    def waitfor(self, vm: "GS2VM", obj: Any, event: str, timeout: float) -> Any:
+        """Return a result or a VMCoroutineWait for OP_WAITFOR."""
+        return 0.0
 
     def get_globals(self) -> Dict[str, Any]:
         """Storage for unqualified variable writes. Hosts may share one dict
@@ -527,6 +544,20 @@ class GS2VM:
                         yield float(secs)
                         self._ops_used = 0
                     result = None
+                elif opnum == Op.OP_WAITFOR:
+                    previous = getattr(self, "_call_coro_mode", False)
+                    self._call_coro_mode = coro_mode
+                    try:
+                        self._op_waitfor(frame, instr)
+                    finally:
+                        self._call_coro_mode = previous
+                    value = frame.stack.pop()
+                    if coro_mode and isinstance(value, VMCoroutineWait):
+                        yield value
+                        self._ops_used = 0
+                        value = value.result()
+                    frame.stack.append(value)
+                    result = None
                 elif opnum == Op.OP_CALL:
                     target = frame.stack.pop() if frame.stack else None
                     call_args = [self.deref(a, frame) for a in self._pop_args(frame)]
@@ -719,12 +750,14 @@ class GS2VM:
         return None
 
     def _op_waitfor(self, frame, instr):
-        # waitfor(obj, event, timeout): sig "xssf" -- pop 3 args; not
-        # supported client-side, push 0
-        for _ in range(3):
-            if frame.stack:
-                frame.stack.pop()
-        frame.stack.append(0.0)
+        timeout = gs2_to_num(self.deref(frame.stack.pop(), frame)) if frame.stack else 0.0
+        event = to_str(self.deref(frame.stack.pop(), frame)) if frame.stack else ""
+        obj = self.deref(frame.stack.pop(), frame) if frame.stack else None
+        if isinstance(obj, _ObjectString):
+            obj = obj.target
+        waitfor = getattr(self.host, "waitfor", None)
+        frame.stack.append(waitfor(self, obj, event, timeout)
+                           if waitfor is not None else 0.0)
         return None
 
     # --- literals / scope roots ---
@@ -852,7 +885,7 @@ class GS2VM:
 
     def _op_conv_to_string(self, frame, instr):
         v = self.deref(frame.stack.pop(), frame) if frame.stack else None
-        frame.stack.append(to_str(v))
+        frame.stack.append(_ObjectString(v) if isinstance(v, GS2Object) else to_str(v))
 
     def _op_conv_to_object(self, frame, instr):
         raw = frame.stack.pop() if frame.stack else None
@@ -1729,6 +1762,11 @@ before. has() is only the cheap gate. _ScriptFnRef.get() checks again
             # it is not gated on `public`.
             #   findweapon(...).trigger("onweaponfired", null) is Zelda's only weapon-fire
             #   path (weapon-Player_Movement.txt:473).
+            if name == "trigger" and args and self.host is not None:
+                res = self.host.call_builtin(self, name, args, obj=obj)
+                if res is not NOT_HANDLED:
+                    cls.builtins_called[name] = cls.builtins_called.get(name, 0) + 1
+                    return res
             if owners and name == "trigger" and args:
                 event = str(args[0])
                 cls.builtins_called[name] = cls.builtins_called.get(name, 0) + 1

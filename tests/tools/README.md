@@ -48,7 +48,7 @@ It has no assertions, and pytest does not collect it. It needs the compiler
 and the server directories. This repository does not include either item.
 
 ```bash
-/usr/bin/python3.13 tests/tools/gs2_corpus_sweep.py --out /tmp/gs2_corpus_report.json
+.venv/bin/python tests/tools/gs2_corpus_sweep.py --out /tmp/gs2_corpus_report.json
 ```
 
 The complete corpus takes about 10 seconds. Useful flags: `--corpus` (checkout root),

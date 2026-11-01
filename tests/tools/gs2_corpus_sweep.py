@@ -38,7 +38,7 @@ registry), not by whether the stub answered.
 
 Usage:
 
-    /usr/bin/python3.13 reborn-protocol/tests/tools/gs2_corpus_sweep.py \
+    .venv/bin/python reborn-protocol/tests/tools/gs2_corpus_sweep.py \
         --out /tmp/gs2_corpus_report.json
 
 Add --corpus to point at a different checkout root, --servers to restrict the
