@@ -39,7 +39,7 @@ class PLI(IntEnum):
     NPCDEL = 22                # Delete NPC
     WANTFILE = 23              # Request file
     SHOWIMG = 24               # Show image/level chat
-    UNKNOWN25 = 25             # Unknown
+    TOWEAPON = 25              # PLI_TOWEAPON (IPacketHandler.h:50; slot between SHOWIMGPLAYER and HURTPLAYER)
     HURTPLAYER = 26            # Hurt player
     EXPLOSION = 27             # Bomb explosion
     PRIVATEMESSAGE = 28        # Private message
@@ -147,7 +147,7 @@ class PLI(IntEnum):
     UPDATEPACKAGEREQUESTFILE = 159  # Request package file
     RC_FOLDERDELETE = 160      # Delete folder
     UPDATECLASS = 161          # Class request
-    RC_UNKNOWN162 = 162        # Unknown RC packet
+    PONG = 162                 # Blank packet, sent by RC3 beta (IPacketHandler.h:149 PLI_PONG; PlayerRC.cpp:86)
 
 
 # =============================================================================
@@ -181,7 +181,7 @@ class PLO(IntEnum):
     ITEMDEL = 23               # Item deleted
     NPCMOVED = 24              # NPC moved (hides NPC for warps)
     SIGNATURE = 25             # Server signature
-    NPCACTION = 26             # NPC action (unhandled by 6.037)
+    NPCSETSCRIPT = 26          # Only existed in 1.31-2.03 (NPC.cpp:917 PLO_NPCSETSCRIPT)
     BADDYHURT = 27             # Baddy hurt
     FLAGSET = 28               # Flag set
     NPCDEL = 29                # NPC deleted
@@ -215,7 +215,7 @@ class PLO(IntEnum):
     RC_ACCOUNTPROPSGET = 57    # Account props get (deprecated)
     RC_ACCOUNTCHANGE = 58      # Account change (deprecated)
     RC_PLAYERPROPSCHANGE = 59  # Player props change (deprecated)
-    UNKNOWN60 = 60             # Unknown (unhandled by 5.07+)
+    UNHANDLED60 = 60           # Unhandled by 5.07+
     RC_SERVERFLAGSGET = 61     # Server flags get
     RC_PLAYERRIGHTSGET = 62    # Player rights get
     RC_PLAYERCOMMENTSGET = 63  # Player comments get
@@ -236,26 +236,26 @@ class PLO(IntEnum):
     NC_CONTROL = 78            # NC control (hijacked by GR)
     NPCSERVERADDR = 79         # NPC server address
     NC_LEVELLIST = 80          # Level list
-    UNKNOWN81 = 81             # Unknown
+    UNHANDLED81 = 81           # Unhandled by 5.07+
     SERVERTEXT = 82            # Server text response
-    UNKNOWN83 = 83             # Unknown
+    UNHANDLED83 = 83           # Unhandled by 5.07+
     LARGEFILESIZE = 84         # Large file size
     RAWDATA = 100              # Raw data size
     BOARDPACKET = 101          # Board packet (8192 bytes)
     FILE = 102                 # File transfer
     RC_MAXUPLOADFILESIZE = 103 # Max upload file size
-    UNKNOWN104 = 104           # Unknown (unique code in 5.07/6.037)
+    FILEDECRYPTKEY = 104       # {GCHAR a}{GINT5 x1}{GINT5 x2} file decrypt key (Player.cpp:163)
     UPDATEPACKAGESIZE = 105    # Update package size
     UPDATEPACKAGEDONE = 106    # Update package done
     BOARDLAYER = 107           # Extra board layer
-    UNKNOWN109 = 109           # Unknown
+    HTTPDOWNLOAD = 109         # {GINT5 modTime}{GSTRING url} (Player.cpp:167)
     SETNETCOOKIE = 111         # {STR cookie} - set net cookie (IEnums.h PLO_SETNETCOOKIE)
-    UNKNOWN124 = 124           # Unknown (RC3 player flags?)
+    RC_UNKNOWN124 = 124        # RC3 receives this (Player.cpp:169)
     NPCBYTECODE = 131          # Compiled NPC script
-    UNKNOWN132 = 132           # Unknown (unique, unhandled by 6.037)
-    UNKNOWN133 = 133           # Unknown (unique, unhandled by 6.037)
+    WEAPONBYTECODE = 132       # {GCHAR name_len}{name}{bytecode} (Weapon.cpp:214)
+    CLASSBYTECODE = 133        # {GCHAR name_len}{name}{bytecode} (ScriptClass.cpp:77)
     GANISCRIPT = 134           # Gani script
-    NPCWEAPONSCRIPT = 140      # Weapon script
+    WEAPONBYTECODE2 = 140      # {GSHORT header_len}{header CSV}{bytecode} (Weapon.cpp:213)
     NPCDEL2 = 150              # NPC deleted (with level)
     HIDENPCS = 151             # Hide NPCs
     SAY2 = 153                 # Say/sign text
@@ -273,7 +273,7 @@ class PLO(IntEnum):
     MOVE = 165                 # Move (unhandled by 6.037)
     UNKNOWN166 = 166           # Unknown
     NC_WEAPONLISTGET = 167     # Weapon list get
-    UNKNOWN168 = 168           # Unknown (blank from login server)
+    ONLINEMODE = 168           # Blank; login-complete marker (Player.cpp:763)
     UNKNOWN169 = 169           # Unknown (pointer value?, unhandled by 6.037)
     GHOSTMODE = 170            # Ghost mode
     BIGMAP = 171               # Big map (unhandled by 6.037)
@@ -287,7 +287,7 @@ class PLO(IntEnum):
     SERVERWARP = 178           # Server warp
     RPGWINDOW = 179            # RPG window
     STATUSLIST = 180           # Status list
-    UNKNOWN181 = 181           # Unknown (unique, unhandled by 6.037)
+    PLAYERNOUDP = 181          # {GSHORT playerId}{GCHAR toggle} (Player.cpp:205)
     LISTPROCESSES = 182        # List processes
     UNKNOWN183 = 183           # Unknown
     UNKNOWN184 = 184           # Unknown (screenshots?, unhandled by 6.037)
@@ -296,13 +296,13 @@ class PLO(IntEnum):
     UPDATEPACKAGEISUPDATED = 187  # Update package is updated
     NC_CLASSDELETE = 188       # Class delete
     MOVE2 = 189                # Move 2
-    UNKNOWN190 = 190           # Unknown (triggers IRC login, etc.)
+    SERVERLISTCONNECTED = 190  # Blank; listserver is up, client may log into IRC (PlayerClient.cpp:489, ServerList.cpp:368)
     SHOOT2 = 191               # Shoot 2
     NC_WEAPONGET = 192         # Weapon get
-    UNKNOWN193 = 193           # Unknown (5-byte int?, unhandled by 6.037)
-    CLEARWEAPONS = 194         # Clear weapons
+    WEAPONHASH = 193           # {GINT5 checksum}{name} (Weapon.cpp:199)
+    RESETCLIENT = 194          # Blank; sent before weapon list (PlayerClient.cpp:492)
     LOADGANI = 195             # {GCHAR len}{gani}{"SETBACKTO <ani>"} - load gani (IEnums.h PLO_LOADGANI)
-    SERVERLISTCONNECTED = 196  # List server is connected (blank packet)
+    UNKNOWN196 = 196           # Not in the reference enum (gap between LOADGANI 195 and LOADSCRIPT 197)
     LOADSCRIPT = 197           # {type,name,save[,desKey,crc]}[bytecode] - script header/bytecode (IEnums.h PLO_LOADSCRIPT)
     UNKNOWN198 = 198           # Unknown
 
@@ -619,7 +619,7 @@ class PLFLAG(IntFlag):
 # PLPERM - Player Permissions (Admin Rights)
 # =============================================================================
 class PLPERM(IntFlag):
-    """Player permissions (admin rights)"""
+    """Player permissions (admin rights); GServer-v2/server/include/Account.h:29-50."""
     WARPTO = 0x00001           # Warp to level
     WARPTOPLAYER = 0x00002     # Warp to player
     SUMMON = 0x00004           # Summon player
@@ -634,12 +634,12 @@ class PLPERM(IntFlag):
     BAN = 0x00800              # Ban player
     SETCOMMENTS = 0x01000      # Set player comments
     INVISIBLE = 0x02000        # Go invisible
-    SETSERVEROPTIONS = 0x04000 # Set server options
+    MODIFYSTAFFACCOUNT = 0x04000  # Create/edit/delete accounts, admin-only options and files
     SETSERVERFLAGS = 0x08000   # Set server flags
-    SETFOLDERCONFIG = 0x10000  # Set folder config
-    SETACCOUNT = 0x20000       # Set account info
-    FILEBROWSER = 0x40000      # Use file browser
-    SERVERWARP = 0x80000       # Server warp
+    SETSERVEROPTIONS = 0x10000  # Set server options
+    SETFOLDEROPTIONS = 0x20000  # Set folder config
+    SETFOLDERRIGHTS = 0x40000  # Set folder rights
+    NPCCONTROL = 0x80000       # NPC-Server control
 
 
 # =============================================================================

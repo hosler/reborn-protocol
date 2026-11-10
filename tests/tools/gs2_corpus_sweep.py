@@ -15,7 +15,7 @@ What it sweeps, per server directory:
   npcs/*.txt         GRNPC001 wrapper; body between NPCSCRIPT/NPCSCRIPTEND
   scripts/*.txt      raw script-class source (no wrapper)
   weapon_bytecode/*  PRECOMPILED blobs produced by the OFFICIAL compiler, in
-                     PLO_NPCWEAPONSCRIPT payload form ({GSHORT header_len}
+                     PLO_WEAPONBYTECODE2 payload form ({GSHORT header_len}
                      {header CSV}{container}) -- the highest-value inputs,
                      since only these can carry opcodes our own compiler
                      never emits
@@ -243,7 +243,7 @@ def find_container(data: bytes) -> int:
 
     The vendored blobs are captured at different points in the pipeline:
     some are bare `.gs2bc` compiler output (container at 0), the rest are
-    PLO_NPCWEAPONSCRIPT payloads -- {GSHORT header_len}{header CSV}{container}
+    PLO_WEAPONBYTECODE2 payloads -- {GSHORT header_len}{header CSV}{container}
     (Weapon.cpp sendByteCodeToPlayer) -- and some of THOSE still carry the
     leading packet-id byte. Probing for the first offset that parses cleanly
     handles all three without having to guess which capture this is.

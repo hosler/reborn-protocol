@@ -82,7 +82,7 @@ def _read_cstr(data: bytes, pos: int) -> (str, int):
 
 def parse_container(data: bytes) -> GS2Container:
     """Parse a raw GS2 bytecode blob (as received in PLO_NPCBYTECODE /
-    PLO_GANISCRIPT / PLO_NPCWEAPONSCRIPT / etc, or read from GS2Bytecode's
+    PLO_GANISCRIPT / PLO_WEAPONBYTECODE2 / etc, or read from GS2Bytecode's
     on-disk output) into a GS2Container.
 
     Raises GS2ContainerError on malformed input rather than silently

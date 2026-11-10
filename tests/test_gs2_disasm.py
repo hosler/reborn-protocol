@@ -12,7 +12,7 @@ Two corpora:
      the compiler's test suite output.
 
 Note on the weapon fixture: upstream GServer-v2's Weapon::sendByteCodeToPlayer
-(server/src/object/Weapon.cpp) sent PLO_NPCWEAPONSCRIPT as a plain packet,
+(server/src/object/Weapon.cpp) sent PLO_WEAPONBYTECODE2 as a plain packet,
 unlike ScriptClass/GameAni which wrap their bytecode packets in PLO_RAWDATA
 (Level.cpp:1356, GameAni.cpp:117). Without RAWDATA framing, any raw 0x0a byte
 inside the bytecode truncated the packet at normal newline-delimited packet
@@ -109,7 +109,7 @@ def test_live_gani_qa_script_decodes():
 
 def test_truncated_blob_raises_cleanly():
     """A blob whose bytecode segment is cut short (as happens for
-    PLO_NPCWEAPONSCRIPT from unfixed upstream servers, see module docstring)
+    PLO_WEAPONBYTECODE2 from unfixed upstream servers, see module docstring)
     must raise GS2ContainerError, never silently misparse or crash with an
     unrelated exception."""
     # 4 well-formed segments, but the bytecode segment's declared length

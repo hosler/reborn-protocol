@@ -146,7 +146,7 @@ def _parse_listing(path: str):
 def test_disassembly_matches_independent_listing(listing_path):
     with open(listing_path[: -len(".gasm")] + ".gs2bc", "rb") as fh:
         data = fh.read()
-    # PLO_NPCWEAPONSCRIPT payload: {GSHORT header_len}{header CSV}{container}
+    # PLO_WEAPONBYTECODE2 payload: {GSHORT header_len}{header CSV}{container}
     header_len = ((data[0] << 7) | data[1]) - 0x1020
     container = parse_container(data[2 + header_len:])
     instrs = decode(container.code)
