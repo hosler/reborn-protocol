@@ -286,3 +286,51 @@ def test_range_exclusive_upper_bound_with_arithmetic():
     assert this_value(ctx, "r") == 1.0      # 5 in [0,10) -> true
     assert this_value(ctx, "r2") == 0.0     # 5 in [0,5) -> false
     assert this_value(ctx, "done") == 1.0   # statement not dropped
+
+
+# -- #s/#I first argument defaults to client flags (d5b61a2d) -------------
+# Oracle: GServer-v2 origin/beta4 server/src/scripting/gs1/GS1MessageCodes.cpp
+# :180-215 (flagProcessingMessageCodes = #I, #s; expectingFlag cleared after
+# the first packaged argument) with GS1Visitor.cpp:1647 (`!storage &&
+# expectingFlag` -> CLIENT storage). Before d5b61a2d the flag stayed set for
+# the #I index too, so an unprefixed index variable was read from client flags.
+def _eval_msg(ctx, expr):
+    return Interpreter(ctx).eval(parse(expr + ";").body[0].expr)
+
+
+def _ctx_with(client=None, this=None, bare=None):
+    from reborn_protocol.gs1.runtime import Context, VarStore
+    ctx = Context(MemoryHost(), VarStore(player_flags=dict(bare or {})))
+    ctx.vars.scopes["client"].update(client or {})
+    ctx.vars.scopes["this"].update(this or {})
+    return ctx
+
+
+@pytest.mark.parametrize("expr,expected", [
+    ("#s(mylist)", "zero,one,two"),           # unprefixed -> client
+    ("#s(client.mylist)", "zero,one,two"),
+    ("#s(this.mylist)", "wrong,list"),        # explicit prefix kept
+    ("#I(mylist,1)", "one"),
+    ("#I(this.mylist,1)", "list"),
+])
+def test_message_code_first_argument_scope(expr, expected):
+    ctx = _ctx_with(client={"mylist": "zero,one,two"},
+                    this={"mylist": "wrong,list"})
+    assert to_str_(_eval_msg(ctx, expr)) == expected
+
+
+def test_message_code_index_is_ordinary_not_client_flag():
+    ctx = _ctx_with(client={"mylist": "zero,one,two", "i": "2"},
+                    bare={"i": 1.0})
+    assert _eval_msg(ctx, "#I(mylist,i)") == "one"
+
+
+def test_message_code_unset_client_flag_falls_back_to_bare_store():
+    ctx = _ctx_with(bare={"mylist": "a,b"})
+    assert _eval_msg(ctx, "#s(mylist)") == "a,b"
+    assert _eval_msg(ctx, "#s(missing)") == ""
+
+
+def to_str_(v):
+    from reborn_protocol.gs1.values import to_str
+    return to_str(v)

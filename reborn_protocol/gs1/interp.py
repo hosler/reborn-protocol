@@ -673,6 +673,25 @@ case-insensitive like every GS1 name. Parameters bind from #p(n)
     def _ex_MessageCode(self, node):
         return self._eval_messagecode(node)
 
+    def _client_flag_arg(self, arg):
+        """First argument of #s/#I (flagProcessingMessageCodes,
+        GS1MessageCodes.cpp; d5b61a2d limits it to the first argument): an
+        UNPREFIXED identifier is looked up in client (player flag) storage
+        (GS1Visitor::visitIdentifierValue `!storage && expectingFlag`);
+        prefixed names (this./server./...) keep their own scope and are left
+        to ordinary evaluation. Returns UNSET when there is no client flag, so
+        the caller falls back to the ordinary bare lookup: hosts whose bare
+        store is separate from the `client` scope (pyReborn) keep reading what
+        bare `setstring name,...` wrote."""
+        if not isinstance(arg, ast.VarRef):
+            return UNSET
+        scope, key, indices, _names = self._resolve(arg)
+        if scope is not None or not key or key in RESERVED_CONSTANTS:
+            return UNSET
+        if self.ctx.vars.get("client", key) is UNSET:
+            return UNSET                 # an index would turn "missing" into 0.0
+        return self.ctx.vars.get("client", key, indices[0] if indices else None)
+
     def _eval_messagecode(self, node):
         code = node.code
         a = node.args
@@ -688,6 +707,9 @@ case-insensitive like every GS1 name. Parameters bind from #p(n)
             # #s(server.roomN*) being "" when a room has no 223-overflow twin.
             if not a:
                 return ""
+            v = self._client_flag_arg(a[0])
+            if v is not UNSET:
+                return to_str(v)
             if isinstance(a[0], ast.VarRef):
                 v = self.get_ref(a[0])
                 return "" if v is UNSET_VAL else to_str(v)
@@ -713,7 +735,10 @@ case-insensitive like every GS1 name. Parameters bind from #p(n)
             return ""
         if code == "#I":  # csv item by index
             if len(a) >= 2:
-                csv = to_str(self.eval(a[0]))
+                # Only the FIRST argument is flag-mode; the index is an
+                # ordinary expression (d5b61a2d).
+                csv = self._client_flag_arg(a[0])
+                csv = to_str(self.eval(a[0]) if csv is UNSET else csv)
                 idx = gs1_index(self.eval(a[1]))
                 items = gs1_csv_split(csv)
                 return items[idx] if 0 <= idx < len(items) else ""
