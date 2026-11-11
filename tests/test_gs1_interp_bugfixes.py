@@ -154,16 +154,8 @@ def test_getdir_cardinals():
 
 
 def test_getdir_pure_vertical():
-    # The compiled GServer-v2 reference binary has a verbatim quirk here
-    # (fn_getdir only computes its angle
-    # `if (!DoubleIsZero(dx) || DoubleIsZero(dy))`, which is false for a
-    # pure-vertical delta, so BOTH straight up and straight down fall back to
-    # the 0.0 default -> "right"). That contradicts GServer's own docs table
-    # ((0,-1)->0 up, (0,1)->2 down) and real gameplay expectations, so this
-    # port deliberately does NOT replicate the guard: gameplay fidelity wins
-    # over bug-for-bug reference fidelity here (coordinator decision; see
-    # tests/test_gs1_oracle.py KNOWN_UPSTREAM_BUGS["getdir-vertical"] and
-    # corpus case getdir-vertical for the oracle-verified contrast).
+    # (0,-1)->0 up, (0,1)->2 down: GServer's docs table and, since 68019d91,
+    # its code (the older 9e759e9d code mis-guarded this case and returned 3).
     ctx = run("this.up=getdir(0,-1); this.down=getdir(0,1);")
     assert probe(ctx, "this.up") == 0.0
     assert probe(ctx, "this.down") == 2.0
@@ -180,11 +172,51 @@ def test_getdir_diagonals_biased_up_and_down():
     assert probe(ctx, "this.sw") == 2.0   # down-left  -> biased down
 
 
-def test_getdir_zero_delta_defaults_right():
-    # atan2(0,0) == 0.0, which is < pi/4 -> "right", same fallback _getangle
-    # already uses for a zero vector.
+def test_getdir_zero_delta_is_up():
+    # 68019d91 (origin/beta4 GS1Functions.cpp fn_getdir): |dy| >= |dx| and
+    # dy is zero -> 0 (up). Was 3 under the old atan2 form.
     ctx = run("this.d=getdir(0,0);")
-    assert probe(ctx, "this.d") == 3.0
+    assert probe(ctx, "this.d") == 0.0
+
+
+def test_getdir_vectors_from_68019d91():
+    cases = [((0, -1), 0), ((-1, 0), 1), ((0, 1), 2), ((1, 0), 3),
+             ((0.5, -0.5), 0), ((-0.5, -0.5), 0), ((0.5, 0.5), 2),
+             ((-0.5, 0.5), 2), ((0.5, 0.4), 3), ((0, 0), 0),
+             ((1e-17, 0), 0), ((1, 1), 2), ((1, -1), 0)]
+    for (dx, dy), want in cases:
+        ctx = run(f"this.d=getdir({dx},{dy});")
+        assert probe(ctx, "this.d") == float(want), (dx, dy)
+
+
+# -- `%` is floored on the int64-truncated operands (c3f6d8bf) ----------------
+def test_modulo_floored_vectors_from_c3f6d8bf():
+    cases = [("-1%5", 4), ("7%-5", -3), ("-7%3", 2), ("-7%-5", -2),
+             ("7%-3", -2), ("7.9%3", 1), ("-7.9%3", 2), ("-0.5%5", 0),
+             ("-4.5%5", 1), ("1.5%5", 1), ("-5%5", 0), ("23%8", 7),
+             ("5%0", 0)]
+    for expr, want in cases:
+        ctx = run(f"this.m={expr};")
+        assert probe(ctx, "this.m") == float(want), expr
+
+
+def test_compound_modulo_is_floored_too():
+    # Deliberate deviation: origin/beta4 left `%=` on the old truncated rule
+    # (GS1Visitor.cpp OP_ASSIGN_MOD); we use the floored rule for both
+    # operators (GS2 OP_MOD, the reference client's only modulus, is floored:
+    # Preagonal/FourPlay/quattroplay/src/TScriptMachine.cpp:3091).
+    ctx = run("this.x=10; this.x %= 3; this.y=-1; this.y %= 5;")
+    assert probe(ctx, "this.x") == 1.0
+    assert probe(ctx, "this.y") == 4.0
+
+
+# -- negative values in an array literal (84319f0d) --------------------------
+def test_array_literal_with_negative_values():
+    # Catch_tests GS1_tests.cpp "arithmetic/array": size()==11, at(3)==-1.
+    ctx = run("this.nv = {1,1,0,-1,-1,0,1,1,0,-1,-1};"
+              "this.n = arraylen(this.nv); this.e = this.nv[3];")
+    assert probe(ctx, "this.n") == 11.0
+    assert probe(ctx, "this.e") == -1.0
 
 
 # -- setarray on an existing array resizes, preserving contents (f6803352) --

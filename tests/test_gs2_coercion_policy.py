@@ -141,7 +141,10 @@ def test_vm_reexports_the_policy_home():
 # --- GS1 call sites go through the GS1 policy -------------------------------
 
 def test_gs1_modulo_truncates_both_operands():
+    """Operands truncate toward zero, then the result is floored (sign of the
+    divisor). GServer-v2 origin/beta4 c3f6d8bf, GS1Visitor.cpp
+    visitExpressionMultiplicative (:1417-1423 at that commit)."""
     from reborn_protocol.gs1.interp import Interpreter
     assert Interpreter._mod(7.9, 3.0) == 1.0
-    assert math.copysign(1.0, Interpreter._mod(-7.9, 3.0)) == -1.0
+    assert Interpreter._mod(-7.9, 3.0) == 2.0
     assert Interpreter._mod(5.0, 0.0) == 0.0

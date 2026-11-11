@@ -38,19 +38,17 @@ KNOWN_UPSTREAM_BUGS = {
     # upstream Catch2 test "reserved constants cannot be used as variables"
     # fails in their own suite.  We resolve constants everywhere.
     "pi-in-call": "upstream constants don't resolve inside call arguments",
-    # fn_getdir (9e759e9d) only computes its angle
-    # `if (!DoubleIsZero(dx) || DoubleIsZero(dy))`, so a pure-vertical delta
-    # (dx==0, dy!=0) skips the atan2 and falls back to angle=0.0 ("right"),
-    # i.e. getdir(0,-1) AND getdir(0,1) both come out 3.0. This contradicts
-    # GServer's own docs (bin/docs/scripting-gs1-functions.md tables
-    # (0,-1)->0 up, (0,1)->2 down). Deliberate decision: gameplay fidelity
-    # over bug-for-bug reference fidelity -- we always compute the real
-    # angle, matching the docs table instead of this guard typo.
-    "getdir-vertical": "upstream skips the angle calc for pure-vertical deltas (typo'd DoubleIsZero guard)",
     # The documented NPC save slots are ten integer values clamped to 0..220,
     # but the server oracle exposes `this.save` as a scalar zero and ignores
     # indexed writes. Keep the documented behavior in the port.
     "save-slot-clamp": "upstream oracle does not expose documented indexed NPC save slots",
+}
+
+# Stale fields must differ until the oracle is rebuilt; all other fields must match.
+STALE_ORACLE_BINARY = {
+    "modulo-pow": {"this.m1", "this.m2"},
+    "getdir-diagonals": {"this.zero"},
+    "getdir-vertical": {"this.d", "this.u"},
 }
 
 TOLERANCE = 1e-6
@@ -209,7 +207,14 @@ def test_script_case(case, oracle_results):
             continue
         assert name in this_scope, \
             f"this.{name}: oracle has {entry}, ours never set it"
-        compare(f"this.{name}", entry, this_scope[name])
+        if f"this.{name}" in STALE_ORACLE_BINARY.get(case.id, set()):
+            assert not math.isclose(
+                float(oracle_value(entry)), float(our_value(this_scope[name])),
+                abs_tol=TOLERANCE), \
+                f"this.{name}: oracle binary appears to have been rebuilt; " \
+                "remove this entry from STALE_ORACLE_BINARY"
+        else:
+            compare(f"this.{name}", entry, this_scope[name])
         checked += 1
     assert checked > 0, "case produced nothing to compare"
 

@@ -882,15 +882,21 @@ case-insensitive like every GS1 name. Parameters bind from #p(n)
 
     @staticmethod
     def _mod(a, b):
-        # Both operands truncate to an integer FIRST (C int64_t semantics:
-        # `static_cast<int64_t>(result) % static_cast<int64_t>(right)`), THEN
-        # modulo -- so 7.9 % 3 == 1 (7 % 3), not fmod(7.9, 3) == 1.9.
-        # values.gs1_int is that cast; math.fmod (not Python's `%`) then
-        # matches C's sign-of-dividend convention.
+        # Both operands truncate toward zero to an integer FIRST (C
+        # `static_cast<int64_t>`: values.gs1_int), THEN the remainder takes the
+        # sign of the DIVISOR (floored, == Python int `%`): -1 % 5 == 4,
+        # 7 % -5 == -3, 7.9 % 3 == 1.  Reference: GServer-v2 c3f6d8bf,
+        # GS1Visitor.cpp visitExpressionMultiplicative
+        # `(remainder % divisor + divisor) % divisor`.
+        # Used for `%=` too.  The reference leaves its compound `%=` path on
+        # the old sign-of-dividend rule (GS1Visitor.cpp OP_ASSIGN_MOD); that
+        # looks like an oversight, so we deliberately apply floored to both,
+        # as the one reference-client modulus does (GS2 OP_MOD is floored and
+        # has no separate compound opcode: TScriptMachine.cpp:3091).
         ib = gs1_int(b)
         if ib == 0:
             return 0.0
-        return math.fmod(gs1_int(a), ib)
+        return float(gs1_int(a) % ib)
 
     @staticmethod
     def _eq(a, b):
@@ -1315,42 +1321,19 @@ def _getangle(a):
 
 
 def _getdir(a):
-    # GServer-v2 fn_getdir (GS1Functions.cpp, commit 9e759e9d) is angle-based,
-    # not a cardinal snap: atan2 over the full circle (Y flipped to match the
-    # game's coordinate system), biased to up/down on the diagonals.
-    #   right if angle <  pi/4        up    if angle <= 3*pi/4
-    #   left  if angle <  5*pi/4      down  if angle <= 7*pi/4
-    #   else (>= 7*pi/4)  right
-    #
-    # The compiled reference binary has a verbatim quirk here: its angle is
-    # only computed `if (!DoubleIsZero(dx) || DoubleIsZero(dy))`, so a
-    # pure-vertical delta (dx == 0, dy != 0 -- straight up/down) skips the
-    # atan2 and falls back to the 0.0 default, i.e. BOTH getdir(0,-1) and
-    # getdir(0,1) come out "right" (3.0). That contradicts GServer's own docs
-    # (bin/docs/scripting-gs1-functions.md tables (0,-1)->0, (0,1)->2) and
-    # real player-facing gameplay expectations. Decision: gameplay fidelity
-    # wins over bug-for-bug reference fidelity here, so we always compute the
-    # real angle (matching the docs table) rather than replicate that guard.
-    # See tests/test_gs1_oracle.py KNOWN_UPSTREAM_BUGS["getdir-vertical"] and
-    # corpus case getdir-vertical for the oracle-verified contrast.
+    # GServer-v2 fn_getdir after 68019d91 (GS1Functions.cpp): compare the
+    # axes, no angle math.  Directions: 0 up, 1 left, 2 down, 3 right (screen
+    # coordinates, +y down).  Ties (|dy| == |dx|) go to the vertical axis,
+    # matching bin/docs/scripting-gs1-functions.md; the zero vector is "up".
+    #   |dy| >= |dx|: up if dy is zero-or-negative, else down
+    #   otherwise:    left if dx is zero-or-negative, else right
+    # (DoubleIsZero == |v| < DBL_EPSILON.)
     dx = to_num(a[0]) if a else 0.0
     dy = to_num(a[1]) if len(a) > 1 else 0.0
-    angle = math.atan2(-dy, dx)  # game flips Y; atan2(0,0)==0.0 for dx=dy=0
-    if angle < 0.0:
-        angle += 2 * math.pi
-    angle_ne = math.pi / 4.0
-    angle_nw = math.pi * 3.0 / 4.0
-    angle_sw = math.pi + angle_ne
-    angle_se = math.pi + angle_nw
-    if angle < angle_ne:
-        return 3.0
-    if angle <= angle_nw:
-        return 0.0
-    if angle < angle_sw:
-        return 1.0
-    if angle <= angle_se:
-        return 2.0
-    return 3.0
+    eps = 2.220446049250313e-16
+    if abs(dy) >= abs(dx):
+        return 0.0 if (abs(dy) < eps or dy < 0.0) else 2.0
+    return 1.0 if (abs(dx) < eps or dx < 0.0) else 3.0
 
 
 def _aindexof(a):
