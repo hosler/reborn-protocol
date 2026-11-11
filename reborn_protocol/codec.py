@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 # struct.pack('>H', ...) length-prefix field is 16 bits; a bundle bigger than
 # this would raise an unhandled struct.error. Reference (gs2lib
-# CFileQueue.cpp:244-248) tosses oversize packets rather than sending them.
+# CFileQueue.cpp:252-256) tosses oversize packets rather than sending them.
 MAX_PACKET_LEN = 0xFFFF
 
 
@@ -83,7 +83,7 @@ class PacketReader:
         """
         Read a 2-byte GSHORT value.
         Encoding: ((b1 - 32) << 7) + (b2 - 32)
-        Range: 0-28767 (reference: gs2lib CString::readGShort, CString.cpp:1619)
+        Range: 0-28767 (reference: gs2lib CString::readGShort, CString.cpp:1826)
         """
         if self.pos + 1 >= len(self.data):
             self.pos = len(self.data)  # avoid infinite loop in has_data() readers
@@ -100,7 +100,7 @@ class PacketReader:
         """
         Read a 3-byte GINT value.
         Encoding: ((b1 - 32) << 14) + ((b2 - 32) << 7) + (b3 - 32)
-        Range: 0-3682399 (reference: gs2lib CString::readGInt, CString.cpp:1627).
+        Range: 0-3682399 (reference: gs2lib CString::readGInt, CString.cpp:1836).
         Must be + (not |): b2's high bit can overlap b1's low bit at bit 14.
         """
         if self.pos + 2 >= len(self.data):
@@ -116,7 +116,7 @@ class PacketReader:
         """
         Read a 4-byte GINT4 value.
         Encoding: ((b1-32) << 21) + ((b2-32) << 14) + ((b3-32) << 7) + (b4-32)
-        Range: 0-471347295 (reference: gs2lib CString::readGInt4, CString.cpp:1635).
+        Range: 0-471347295 (reference: gs2lib CString::readGInt4, CString.cpp:1844).
         Must be + (not |): capped-byte encodings carry across the 7-bit lanes.
         """
         if self.pos + 3 >= len(self.data):
@@ -133,7 +133,7 @@ class PacketReader:
         """
         Read a 5-byte GINT5 value (32-bit range, for timestamps/CRC32).
         Encoding: 4/7/7/7/7-bit big-endian packing, each byte -32 before
-        folding (reference: gs2lib CString::readGInt5, CString.cpp:1644 —
+        folding (reference: gs2lib CString::readGInt5, CString.cpp:1853 —
         that version folds raw bytes and subtracts a single 0x4081020
         constant. This is the algebraically equivalent per-byte-offset form,
         masked to 32 bits to match its unsigned int return).
@@ -228,7 +228,7 @@ class PacketBuilder:
 
     def write_gchar(self, value: int) -> 'PacketBuilder':
         """Write a GCHAR (value + 32, clamped to 223 before the offset).
-        Reference: gs2lib CString::writeGChar (CString.cpp:1519) — values
+        Reference: gs2lib CString::writeGChar (CString.cpp:1717) — values
         >= 223 pass through WITHOUT the +32 (so 234 must clamp to 223, not
         wrap mod 256 into '\\n'/0x0A and corrupt newline-framed bundles)."""
         v = max(0, min(int(value), 223))
@@ -237,7 +237,7 @@ class PacketBuilder:
 
     def write_gshort(self, value: int) -> 'PacketBuilder':
         """Write a 2-byte GSHORT value. Max 28767.
-        Reference: gs2lib CString::writeGShort (CString.cpp:1526)."""
+        Reference: gs2lib CString::writeGShort (CString.cpp:1734)."""
         t = max(0, min(int(value), 28767))
         b0 = t >> 7
         if b0 > 223:
@@ -249,7 +249,7 @@ class PacketBuilder:
 
     def write_gint3(self, value: int) -> 'PacketBuilder':
         """Write a 3-byte GINT value. Max 3682399.
-        Reference: gs2lib CString::writeGInt (CString.cpp:1543)."""
+        Reference: gs2lib CString::writeGInt (CString.cpp:1751)."""
         t = max(0, min(int(value), 3682399))
         b0 = t >> 14
         if b0 > 223:
@@ -266,7 +266,7 @@ class PacketBuilder:
 
     def write_gint4(self, value: int) -> 'PacketBuilder':
         """Write a 4-byte GINT4 value. Max 471347295.
-        Reference: gs2lib CString::writeGInt4 (CString.cpp:1562)."""
+        Reference: gs2lib CString::writeGInt4 (CString.cpp:1770)."""
         t = max(0, min(int(value), 471347295))
         b0 = t >> 21
         if b0 > 223:
@@ -286,7 +286,7 @@ class PacketBuilder:
 
     def write_gint5(self, value: int) -> 'PacketBuilder':
         """Write a 5-byte GINT5 value (32-bit range, 4/7/7/7/7-bit packing).
-        Reference: gs2lib CString::writeGInt5 (CString.cpp:1584)."""
+        Reference: gs2lib CString::writeGInt5 (CString.cpp:1792)."""
         t = max(0, min(int(value), 0xFFFFFFFF))
         b0 = (t >> 28) & 0xFF
         if b0 > 15:  # capped low: higher would exceed 0xFFFFFFFF

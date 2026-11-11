@@ -38,7 +38,8 @@ class PLI(IntEnum):
     PUTNPC = 21                # Put NPC
     NPCDEL = 22                # Delete NPC
     WANTFILE = 23              # Request file
-    SHOWIMG = 24               # Show image/level chat
+    SHOWIMGPLAYER = 24         # Show image/level chat (IEnums.h:56 PLI_SHOWIMGPLAYER)
+    SHOWIMG = 24               # Alias of SHOWIMGPLAYER (older name)
     TOWEAPON = 25              # PLI_TOWEAPON (IPacketHandler.h:50; slot between SHOWIMGPLAYER and HURTPLAYER)
     HURTPLAYER = 26            # Hurt player
     EXPLOSION = 27             # Bomb explosion
@@ -53,12 +54,15 @@ class PLI(IntEnum):
     HITOBJECTS = 36            # Hit objects
     LANGUAGE = 37              # Set language
     TRIGGERACTION = 38         # Trigger action
-    MAPINFO = 39               # Map info
+    TAMPERCHECK = 39           # {39}{GINT5 memoryHash1}{GINT5 memoryHash2} - client memory hashes (IEnums.h:71 PLI_TAMPERCHECK)
+    MAPINFO = 39               # Alias of TAMPERCHECK (older name)
     SHOOT = 40                 # Shoot (old format)
     SERVERWARP = 41            # Server warp
     MUTEPLAYER = 43            # Mute/unmute player
     PROCESSLIST = 44           # Process list
-    UNKNOWN46 = 46             # Unknown (player count for gmap?)
+    PROCESSRUNNING = 45        # {45}{GCHAR flag} - reply to PLO_HASPROCESSRUNNING, flag 1 if true (IEnums.h:76 PLI_PROCESSRUNNING)
+    ENTERLEVEL = 46            # {46}{GCHAR 1} - sent when the player enters a new level (IEnums.h:77 PLI_ENTERLEVEL)
+    UNKNOWN46 = 46             # Alias of ENTERLEVEL (older name)
     VERIFYWANTSEND = 47        # Verify file checksum and send if outdated
     SHOOT2 = 48                # Shoot (new format)
     RAWDATA = 50               # Raw data
@@ -147,7 +151,10 @@ class PLI(IntEnum):
     UPDATEPACKAGEREQUESTFILE = 159  # Request package file
     RC_FOLDERDELETE = 160      # Delete folder
     UPDATECLASS = 161          # Class request
-    PONG = 162                 # Blank packet, sent by RC3 beta (IPacketHandler.h:149 PLI_PONG; PlayerRC.cpp:86)
+    PONG = 162                 # {162}{GCHAR type}{GSHORT value} - type is always 1 on a pong reply to PLO_PING (IEnums.h:162 PLI_PONG)
+
+    SET_ENC_KEY = 252          # Set AES / RC4 encryption key and init vector (IEnums.h:163 PLI_SET_ENC_KEY)
+    BUNDLE = 253               # Bundled packets contain multiple packets (IEnums.h:164 PLI_BUNDLE)
 
 
 # =============================================================================
@@ -187,7 +194,8 @@ class PLO(IntEnum):
     NPCDEL = 29                # NPC deleted
     FILESENDFAILED = 30        # File send failed
     FLAGDEL = 31               # Flag deleted
-    SHOWIMG = 32               # Show image
+    SHOWIMGPLAYER = 32         # Show image (IEnums.h:201 PLO_SHOWIMGPLAYER)
+    SHOWIMG = 32               # Alias of SHOWIMGPLAYER (older name)
     NPCWEAPONADD = 33          # Weapon added
     NPCWEAPONDEL = 34          # Weapon deleted
     RC_ADMINMESSAGE = 35       # Admin message
@@ -244,11 +252,13 @@ class PLO(IntEnum):
     BOARDPACKET = 101          # Board packet (8192 bytes)
     FILE = 102                 # File transfer
     RC_MAXUPLOADFILESIZE = 103 # Max upload file size
-    FILEDECRYPTKEY = 104       # {GCHAR a}{GINT5 x1}{GINT5 x2} file decrypt key (Player.cpp:163)
+    FILEDECRYPTKEY = 104       # {GSTRING file}{GCHAR keyPurpose}{GINT5 x1}{GINT5 x2} - x1/x2 make an 8-byte DES key; purpose 0 = .gpake, 1 = .enc (IEnums.h:258)
     UPDATEPACKAGESIZE = 105    # Update package size
     UPDATEPACKAGEDONE = 106    # Update package done
     BOARDLAYER = 107           # Extra board layer
-    HTTPDOWNLOAD = 109         # {GINT5 modTime}{GSTRING url} (Player.cpp:167)
+    PING = 108                 # {108}{GCHAR type}{GSHORT value} - type 0 is answered by PLI_PONG, type 1 is stored (IEnums.h:262 PLO_PING)
+    HTTPDOWNLOAD = 109         # {GINT5 modTime?}{GSTRING localfile}{GSTRING url} - download url, save as localfile (IEnums.h:263)
+    UNHANDLED110 = 110         # IEnums.h:264 PLO_UNHANDLED110
     SETNETCOOKIE = 111         # {STR cookie} - set net cookie (IEnums.h PLO_SETNETCOOKIE)
     RC_UNKNOWN124 = 124        # RC3 receives this (Player.cpp:169)
     NPCBYTECODE = 131          # Compiled NPC script
@@ -271,10 +281,10 @@ class PLO(IntEnum):
     NC_CLASSADD = 163          # Class add
     NC_LEVELDUMP = 164         # Level dump
     MOVE = 165                 # Move (unhandled by 6.037)
-    UNKNOWN166 = 166           # Unknown
+    SHOWIMGNPC = 166           # {166}{GINT3 npcId}{GCHAR index}{props} (IEnums.h:287 PLO_SHOWIMGNPC)
     NC_WEAPONLISTGET = 167     # Weapon list get
     ONLINEMODE = 168           # Blank; login-complete marker (Player.cpp:763)
-    UNKNOWN169 = 169           # Unknown (pointer value?, unhandled by 6.037)
+    UPGRADEURL = 169           # With PLO_DISCONNECT, the reconnect button becomes "Upgrade" and opens the URL (IEnums.h:290 PLO_UPGRADEURL)
     GHOSTMODE = 170            # Ghost mode
     BIGMAP = 171               # Big map (unhandled by 6.037)
     MINIMAP = 172              # Mini map
@@ -292,8 +302,8 @@ class PLO(IntEnum):
     STATUSLIST = 180           # Status list
     PLAYERNOUDP = 181          # {GSHORT playerId}{GCHAR toggle} (Player.cpp:205)
     LISTPROCESSES = 182        # List processes
-    UNKNOWN183 = 183           # Unknown
-    UNKNOWN184 = 184           # Unknown (screenshots?, unhandled by 6.037)
+    HASPROCESSRUNNING = 183    # {183}{GSTRINGLIST text} - client answers PLI_PROCESSRUNNING (IEnums.h:304 PLO_HASPROCESSRUNNING)
+    TAKESCREENSHOT = 184       # {184}{STR filename} - take a screenshot and save it as filename (IEnums.h:305 PLO_TAKESCREENSHOT)
     BOARDHEIGHTS = 185         # Level height overrides (gmap terrain)
     BOARDMODIFY2 = 186         # Board modification (gmap: mapX/mapY + tile delta)
     UPDATEPACKAGEISUPDATED = 187  # Update package is updated
@@ -305,9 +315,12 @@ class PLO(IntEnum):
     WEAPONHASH = 193           # {GINT5 checksum}{name} (Weapon.cpp:199)
     RESETCLIENT = 194          # Blank; sent before weapon list (PlayerClient.cpp:492)
     LOADGANI = 195             # {GCHAR len}{gani}{"SETBACKTO <ani>"} - load gani (IEnums.h PLO_LOADGANI)
-    UNKNOWN196 = 196           # Not in the reference enum (gap between LOADGANI 195 and LOADSCRIPT 197)
+    UNKNOWN196 = 196           # Ours only: the reference enum has no id 196 (gap between LOADGANI 195 and LOADSCRIPT 197)
     LOADSCRIPT = 197           # {type,name,save[,desKey,crc]}[bytecode] - script header/bytecode (IEnums.h PLO_LOADSCRIPT)
-    UNKNOWN198 = 198           # Unknown
+    SERVEROPTIONS = 198        # {198}{GINT5 serverOptions} (IEnums.h:318 PLO_SERVEROPTIONS)
+
+    SET_ENC_KEY = 252          # Set AES / RC4 encryption key and init vector (IEnums.h:319 PLO_SET_ENC_KEY)
+    BUNDLE = 253               # Bundled packets contain multiple packets (IEnums.h:320 PLO_BUNDLE)
 
 
 # =============================================================================
