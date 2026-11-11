@@ -281,9 +281,12 @@ class PLO(IntEnum):
     GHOSTTEXT = 173            # Ghost mode text
     GHOSTICON = 174            # Ghost mode icon
     SHOOT = 175                # Shoot (unhandled by 6.037)
-    DISABLECLASSICMODE = 176   # Disable classic mode (turns off old game mechanics; IEnums.h PLO_DISABLECLASSICMODE)
-    FULLSTOP = 176             # Deprecated alias for DISABLECLASSICMODE (old pyReborn name)
-    FULLSTOP2 = 177            # Full stop 2 (unhandled by 5.07+)
+    KINGDOMSMODE = 176         # Server mode is kingdoms: bare packet right after SIGNATURE (GServer-v2 beta4 Player.cpp:748-752; IEnums.h PLO_KINGDOMSMODE)
+    NEWWORLDMODE = 177         # Server mode is newworld: bare packet right after SIGNATURE (Player.cpp:748-752; IEnums.h PLO_NEWWORLDMODE)
+    # Older names for the same two ids, kept so existing callers still resolve.
+    DISABLECLASSICMODE = 176   # Alias of KINGDOMSMODE
+    FULLSTOP = 176             # Alias of KINGDOMSMODE (oldest pyReborn name)
+    FULLSTOP2 = 177            # Alias of NEWWORLDMODE
     SERVERWARP = 178           # Server warp
     RPGWINDOW = 179            # RPG window
     STATUSLIST = 180           # Status list

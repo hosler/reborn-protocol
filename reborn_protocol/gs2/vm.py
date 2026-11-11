@@ -52,6 +52,50 @@ logger = logging.getLogger(__name__)
 NOT_HANDLED = object()
 
 
+class GS2VarString(str):
+    """A string VALUE read out of a variable, property or array element and
+    used as a method-call receiver (`temp.s.savestring(...)`). Distinct from
+    a string literal receiver, which the reference name-resolves to a
+    weapon/universe object (TScriptStackEntry::makeProperty); a value held in
+    a slot never does (switchTypeObject, quattroplay/src/
+    TScriptStackEntry.cpp:299-353)."""
+
+    __slots__ = ()
+
+
+#: Methods the reference client registers on its root variable class, i.e.
+#: callable on ANY variable whatever its value type -- the 44 function
+#: definitions of the variable-object property table (quattroplay/src, the
+#: variable-object properties source, funcDefs lines 215-602; the matching
+#: saveString body, variable-object source lines 530-551, writes the
+#: variable's own value converted to a string).
+#:
+#: Receiver rule (TScriptMachine::functionCall, TScriptMachine.cpp:5514; the
+#: variable's readObject returns the variable itself unless it is a link,
+#: variable-object source 3138-3152): the call target is the variable, so one
+#: holding a string, a number or an empty string answers alike, a number
+#: being read as its string form. A name outside this set resolves
+#: only against an object's property table / own vars
+#: (TScriptMachine.cpp:5283-5322), which a plain value does not have, so it
+#: stays dead. A null / never-assigned slot stays dead too: the VM cannot
+#: tell "assigned null" from "unset", and for an unset name the reference
+#: falls back to the calling script's own object (functionCall, :5533),
+#: not to a receiver value.
+_VAR_METHOD_NAMES = frozenset({
+    "addarraymember", "addnamedstring", "addarray", "cancelevents",
+    "catchevent", "clearvars", "clearemptyvars", "copyfrom",
+    "getarraymember", "getvarnames", "getdynamicvarnames",
+    "getstaticvarnames", "geteditvarnames", "getfunctions", "hasfunction",
+    "ignoreevent", "ignoreevents", "insertarray", "isinclass", "join",
+    "leave", "loadlines", "loadstring", "loadvars", "loadvarsfromarray",
+    "loadfolder", "loadini", "loadjson", "loadjsonfromstring", "objecttype",
+    "scheduleevent", "savelines", "savestring", "savevars",
+    "savevarstoarray", "savejson", "savejsontostring", "settimer",
+    "sortascending", "sortdescending", "sortbyvalue", "subarray2",
+    "timershow", "trigger",
+})
+
+
 class _ObjectString(str):
     """String coercion retaining the source object for event subscriptions.
 
@@ -981,12 +1025,24 @@ before. has() is only the cheap gate. _ScriptFnRef.get() checks again
             # method call whose object may need installing first (the host's
             # weapon-fetch stand-in). Reads/writes on it stay dead
             # (LValue.get/set gate on GS2Object). A string held in a
-            # PROPERTY stays a dead reference: the official conversion only
+            # PROPERTY is never name-resolved: the official conversion only
             # name-resolves literals -- the property case reads the slot's
             # object and falls back to CSV-tokens-or-null
             # (TScriptStackEntry::switchTypeObject/makeProperty,
-            # TScriptStackEntry.cpp:299-353).
+            # TScriptStackEntry.cpp:299-353). It still receives the root
+            # variable methods (savestring...) -- the branch below.
             frame.stack.append(LValue(base_entry, name))
+        elif (isinstance(base, (str, int, float))
+                and isinstance(base_entry, (VarRef, LValue))
+                and name.lower() in _VAR_METHOD_NAMES):
+            # A string held in a variable / property / array element, called
+            # with a name the reference registers on EVERY variable. The
+            # receiver is the variable's own value (`temp.s.savestring(f)`
+            # writes s), so it must reach the host; it rides along tagged as
+            # a GS2VarString so a host can tell it from a literal and skip
+            # the literal-only weapon-name resolution. Any other name stays
+            # a dead reference, as before. See _VAR_METHOD_NAMES.
+            frame.stack.append(LValue(GS2VarString(to_str(base)), name))
         else:
             frame.stack.append(LValue(None, name))
 
@@ -1762,7 +1818,9 @@ before. has() is only the cheap gate. _ScriptFnRef.get() checks again
             # it is not gated on `public`.
             #   findweapon(...).trigger("onweaponfired", null) is Zelda's only weapon-fire
             #   path (weapon-Player_Movement.txt:473).
+            host_asked = False
             if name == "trigger" and args and self.host is not None:
+                host_asked = True
                 res = self.host.call_builtin(self, name, args, obj=obj)
                 if res is not NOT_HANDLED:
                     cls.builtins_called[name] = cls.builtins_called.get(name, 0) + 1
@@ -1774,7 +1832,10 @@ before. has() is only the cheap gate. _ScriptFnRef.get() checks again
                     if other.has_function(event):
                         return other.call(event, *args[1:])
                 return 0.0
-            if self.host is not None and obj is not None:
+            # (a trigger already refused by the host above is not re-asked
+            # with the identical arguments -- that ran a side-effecting host
+            # call twice)
+            if self.host is not None and obj is not None and not host_asked:
                 res = self.host.call_builtin(self, name, args, obj=obj)
                 if res is not NOT_HANDLED:
                     cls.builtins_called[name] = cls.builtins_called.get(name, 0) + 1
@@ -1864,7 +1925,7 @@ before. has() is only the cheap gate. _ScriptFnRef.get() checks again
             # can keep the reference's gated no-op by overriding copy_from.
             obj.copy_from(args[0] if args else None)
             return None
-        if obj is not None and name in self._ROOT_OBJECT_METHODS:
+        if isinstance(obj, GS2Object) and name in self._ROOT_OBJECT_METHODS:
             return None  # object with no array cells: nothing to extend/sort
         return NOT_HANDLED
 
