@@ -133,6 +133,10 @@ MAX_ARRAY_INDEX = 1 << 20
 #: entry, which is why ours are per-frame).
 MAX_REGISTER_INDEX = 0x3FF
 
+# Bare names the reference resolves to scope objects before any variable
+# lookup (see GS2VM._lookup).
+_SCOPE_NAMES = frozenset(("this", "thiso", "temp"))
+
 
 def _denull(value: Any) -> Any:
     """Collapse the GS2_NULL sentinel back to None.
@@ -641,6 +645,22 @@ class GS2VM:
 
     def _lookup(self, name: str, frame: "_Frame") -> Any:
         key = name.lower()
+        if name in _SCOPE_NAMES:
+            # A bare `this` / `thiso` / `temp` arrives as a plain variable
+            # NAME when the server's compiler emits OP_TYPE_VAR instead of
+            # OP_THIS (`Gs2Utils = this;` on a live server). The reference
+            # resolves them ahead of every local/global/member lookup
+            # (TScriptMachine.cpp:5084 "this" -> the current this-object,
+            # :5093 "thiso" -> the script's original object, :5070 "temp"
+            # -> the call scope), so a script variable of that name can
+            # never shadow them. The reference compares these names
+            # byte-exact (TString.cpp:849-860), so only the lowercase
+            # spelling matches here; `Temp`/`This` stay ordinary variables.
+            if key == "this":
+                return self._current_this(frame)
+            if key == "thiso":
+                return self.thiso
+            return frame.temps
         if frame.with_stack:
             for wobj in reversed(frame.with_stack):
                 if isinstance(wobj, GS2Object) and wobj.has(key):
@@ -672,7 +692,7 @@ class GS2VM:
             if head == "temp":
                 node: Any = frame.temps
             elif head in ("this", "thiso"):
-                node = self.this if head == "this" else self.thiso
+                node = self._current_this(frame) if head == "this" else self.thiso
             else:
                 node = self._lookup(head, frame)   # head has no dot
             for part in rest.split("."):
@@ -684,6 +704,13 @@ class GS2VM:
 
     def _assign_name(self, name: str, value: Any, frame: "_Frame") -> None:
         key = name.lower()
+        if name in _SCOPE_NAMES:
+            # (exact lowercase spelling only, as in _lookup) The reference resolves the bare name to the scope OBJECT and
+            # assign() then writes the value into that object (assign(),
+            # TScriptMachine.cpp:5367-5419 writeFloat/writeString on the resolved
+            # variable); it never rebinds `this`/`thiso`/`temp`. Dropping
+            # the write keeps those names pointing at the real scope.
+            return
         if frame.with_stack:
             for wobj in reversed(frame.with_stack):
                 if isinstance(wobj, GS2Object) and wobj.has(key):
