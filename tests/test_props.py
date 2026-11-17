@@ -71,12 +71,19 @@ def test_string_empty_decodes_as_none():
 
 def test_signed_half_tile_coordinate():
     desc = PLAYER_PROPS[15]  # X (PropertyTileCoordinate)
+    """PropertySerializers.cpp:499-509 at GServer-v2 origin/beta4 512b8918:
+    gchar 220 is 110 tiles (only above 223 goes negative); a byte below 32 is
+    negative. Full table: tests/test_tile_coordinate.py."""
     assert decode_value(desc, gchar(63), 0)[0] == 31.5
-    assert decode_value(desc, gchar(220), 0)[0] == -18.0
+    assert decode_value(desc, gchar(220), 0)[0] == 110.0
+    assert decode_value(desc, gchar(-30), 0)[0] == -15.0
 
 
-def test_tile_coordinate_avoids_223():
-    assert encode_value(PLAYER_PROPS[15], 223 / 2.0) == gchar(224)
+def test_tile_coordinate_avoids_newline():
+    """PropertySerializers.cpp:489-491: 111.5 is a legal value (0xFF), and
+    -11.0 (byte 0x0A) moves to -10.5."""
+    assert encode_value(PLAYER_PROPS[15], 223 / 2.0) == gchar(223)
+    assert encode_value(PLAYER_PROPS[15], -11.0) == gchar(-21)
 
 
 def test_pixel_coordinate_round_trip():

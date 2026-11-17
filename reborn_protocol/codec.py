@@ -13,6 +13,7 @@ G-Type Encoding:
 
 import bz2
 import logging
+import math
 import struct
 import zlib
 from typing import Optional, List, Tuple
@@ -48,6 +49,79 @@ def _frame(payload: bytes) -> Optional[bytes]:
 
 
 # =============================================================================
+# One-byte tile coordinate (PropertyTileCoordinate: PLPROP X/Y 15/16,
+# NPCPROP X/Y 2/3, and the X/Y bytes of PLO_PLAYERWARP / PLAYERWARP2)
+# =============================================================================
+#
+# The byte holds half-tiles + 32. Reference: GServer-v2 origin/beta4 512b8918,
+# server/src/utilities/PropertySerializers.cpp:484-509 (rule from upstream
+# commit 18cf7639). It is NOT a gchar: read_gchar clamps a byte below 32 to 0
+# and write_gchar clamps at 223, and both would lose the negative range.
+
+TILE_COORD_MIN_PIXEL = -256     # -16 tiles   (PropertySerializers.cpp:489)
+TILE_COORD_MAX_PIXEL = 1784     # 111.5 tiles (PropertySerializers.cpp:489)
+# Half-tile -22 is wire byte 0x0A, the newline that ends a packet
+# (BAD_BYTE_CAUSES_PACKET_CORRUPTION_SIGNED, CommonTypes.h:537).
+_TILE_COORD_NEWLINE_HALF = -22
+
+
+def decode_tile_coordinate(byte: int) -> float:
+    """Wire byte -> tiles.
+
+    PropertyTileCoordinate::deserialize (PropertySerializers.cpp:499-509)
+    takes half = (uint8)(byte - 32) and subtracts 256 when half > 223. For a
+    byte in 0..255 that is plain ``byte - 32``, the value the reference client
+    reads (`playerEncoded7`, Preagonal/FourPlay/quattroplay/src/
+    TServerPlayer.cpp:38-41, times 0.5 at :1680-1692). So 0x00..0x1F is
+    -16..-0.5 tiles and 0x20..0xFF is 0..111.5 tiles.
+    """
+    return ((int(byte) & 0xFF) - 32) / 2.0
+
+
+def encode_tile_coordinate(tiles: float) -> int:
+    """Tiles -> wire byte, as the reference server serializes it.
+
+    PropertyTileCoordinate::serialize (PropertySerializers.cpp:484-497):
+    pixel = int16(tiles * 16) (truncating ctor, PropertySerializers.h:558),
+    clamp to [-256, 1784], the exact pixel -176 (tile -11.0, byte 0x0A) moves
+    +8 to -168, half = pixel / 8 truncated toward zero, byte = half + 32 wrapped
+    to 8 bits. Values outside -16..111.5 clamp; -11.0 reads back -10.5.
+
+    Two deliberate departures, both for pixels the reference guard misses:
+    - pixels -183..-177 truncate to half -22, which the reference writes as
+      0x0A and so cuts the packet. They get the same +1 half nudge as -176.
+    - pixels -191..-184 truncate to half -23 (uint8 233), where gs2lib
+      writeGCharUnsafe throws (CString.cpp:1730-1736). We write the plain
+      value, byte 0x09, which reads back exactly as -11.5.
+    """
+    pixel = int(float(tiles) * 16)
+    pixel = max(TILE_COORD_MIN_PIXEL, min(TILE_COORD_MAX_PIXEL, pixel))
+    if pixel == _TILE_COORD_NEWLINE_HALF * 8:
+        pixel += 8
+    # C++ integer division truncates toward zero; Python's // floors.
+    half = -((-pixel) // 8) if pixel < 0 else pixel // 8
+    if half == _TILE_COORD_NEWLINE_HALF:
+        half += 1
+    return (half + 32) & 0xFF
+
+
+def encode_client_tile_coordinate(tiles: float) -> int:
+    """Tiles -> wire byte, as the reference client sends PLPROP_X/Y.
+
+    Preagonal/FourPlay/quattroplay/src/TPlayer.cpp:3213-3216 writes
+    ``netInt(floorToInt(tiles * 2.0 + 0.5))`` and netInt is
+    ``(char)(value + 0x20)`` (TPlayer.cpp:279-282): round half up, no clamp,
+    wrap to 8 bits. The client has no newline guard; a result of 0x0A (half
+    -22) takes the server's +1 half nudge (PropertySerializers.cpp:490-491)
+    so the byte cannot end the packet.
+    """
+    byte = (math.floor(float(tiles) * 2 + 0.5) + 32) & 0xFF
+    if byte == 0x0A:
+        byte = 0x0B
+    return byte
+
+
+# =============================================================================
 # PacketReader - Read protocol data types
 # =============================================================================
 
@@ -78,6 +152,14 @@ class PacketReader:
     def read_gchar(self) -> int:
         """Read a GCHAR (byte - 32). Range: 0-223."""
         return max(0, self.read_byte() - 32)
+
+    def read_tile_coordinate(self) -> float:
+        """Read a one-byte tile coordinate (PropertyTileCoordinate) in tiles,
+        -16..111.5. See decode_tile_coordinate. Past the end it returns 0.0
+        without advancing, like the other readers' zero default."""
+        if self.pos >= len(self.data):
+            return 0.0
+        return decode_tile_coordinate(self.read_byte())
 
     def read_gshort(self) -> int:
         """
@@ -233,6 +315,12 @@ class PacketBuilder:
         wrap mod 256 into '\\n'/0x0A and corrupt newline-framed bundles)."""
         v = max(0, min(int(value), 223))
         self._data.append((v + 32) & 0xFF)
+        return self
+
+    def write_tile_coordinate(self, tiles: float) -> 'PacketBuilder':
+        """Write a one-byte tile coordinate the way the reference server
+        serializes PropertyTileCoordinate. See encode_tile_coordinate."""
+        self._data.append(encode_tile_coordinate(tiles))
         return self
 
     def write_gshort(self, value: int) -> 'PacketBuilder':

@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
+from .codec import decode_tile_coordinate, encode_tile_coordinate
+
 __all__ = [
     "Wire", "PropDesc", "StreamPolicy",
     "PLAYER_PROPS", "NPC_PROPS", "BADDY_PROPS",
@@ -52,7 +54,7 @@ class Wire(Enum):
     STRING = auto()       # gchar length + chars -> str (None when empty)
     LONGSTRING = auto()   # gshort length + chars -> str
     VOID = auto()         # no payload
-    TILE = auto()         # signed half-tile gchar -> tiles float
+    TILE = auto()         # PropertyTileCoordinate byte -> tiles float, -16..111.5
     HALFTILE = auto()     # unsigned half-tile gchar -> tiles float
     TILEZ = auto()        # gchar biased by 50 -> tiles int
     PIXEL = auto()        # gshort of (abs(pixels) << 1 | sign) -> tiles float
@@ -271,14 +273,6 @@ def _read_string(data: bytes, pos: int, length_bytes: int):
     return data[pos:end].decode('latin-1', errors='replace'), end
 
 
-def _read_signed_halftile(data: bytes, pos: int):
-    """PropertyTileCoordinate: a gchar of half-tiles where >= 216 is negative."""
-    raw = data[pos] - 32
-    if raw >= 216:
-        raw -= 256
-    return raw / 2.0, pos + 1
-
-
 def decode_value(desc: PropDesc, data: bytes, pos: int,
                  colors_len: int = COLORS_CLASSIC) -> Tuple[Any, int]:
     """Decode one prop payload -> (value, new_pos).
@@ -308,7 +302,7 @@ def decode_value(desc: PropDesc, data: bytes, pos: int,
     if wire is Wire.TILE:
         if pos >= n:
             return None, pos
-        return _read_signed_halftile(data, pos)
+        return decode_tile_coordinate(data[pos]), pos + 1
     if wire is Wire.HALFTILE:
         if pos >= n:
             return None, pos
@@ -439,12 +433,6 @@ def payload_len(desc: PropDesc, data: bytes, pos: int,
 # Encoding
 # =============================================================================
 
-def _gchar_unsafe(value: int) -> bytes:
-    """gs2lib CString::writeGCharUnsafe: value + 32, no clamp. Used where a byte
-    must round-trip a signed value, e.g. PropertyTileCoordinate's half-tiles."""
-    return bytes(((int(value) + 32) & 0xFF,))
-
-
 def _gbyte(value: int, count: int) -> bytes:
     """`count` G-encoded bytes, big-endian 7-bit lanes clamped at 223.
 
@@ -497,10 +485,7 @@ def encode_value(desc: PropDesc, value: Any,
     if wire is Wire.LONGSTRING:
         return _gstring(value, 2)
     if wire is Wire.TILE:
-        halftile = int(float(value) * 2) & 0xFF
-        # PropertyTileCoordinate::serialize:410 nudges 223 to 224 ("223 will
-        # break the packet flow"), i.e. -11 half-tiles becomes -10.5.
-        return _gchar_unsafe(224 if halftile == 223 else halftile)
+        return bytes((encode_tile_coordinate(value),))
     if wire is Wire.HALFTILE:
         return _gbyte(int(float(value) * 2), 1)
     if wire is Wire.TILEZ:

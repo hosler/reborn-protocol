@@ -45,6 +45,9 @@ from .codec import (
     Gen4Codec,
     Gen5Codec,
     ServerCodec,
+    decode_tile_coordinate,
+    encode_tile_coordinate,
+    encode_client_tile_coordinate,
 )
 
 __version__ = "0.1.0"
@@ -80,4 +83,7 @@ __all__ = [
     "Gen4Codec",
     "Gen5Codec",
     "ServerCodec",
+    "decode_tile_coordinate",
+    "encode_tile_coordinate",
+    "encode_client_tile_coordinate",
 ]
